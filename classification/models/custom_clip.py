@@ -24,9 +24,24 @@ class TextEncoder(nn.Module):
         self.attn_mask = clip_model.attn_mask
 
     def forward(self, prompts, tokenized_prompts):
-        x = prompts + self.positional_embedding.type(self.dtype)
+        # prompts: (N, L, dim) where L is the sequence length (can vary)
+        # positional_embedding: (max_seq_len, dim), need to slice to match L
+        seq_len = prompts.shape[1]
+        pos_emb = self.positional_embedding[:seq_len, :].type(self.dtype)
+        x = prompts + pos_emb.unsqueeze(0)  # (N, L, dim)
         x = x.permute(1, 0, 2)  # NLD -> LND
-        x = self.transformer(x, attn_mask=self.attn_mask)
+        
+        # Handle attention mask for variable sequence lengths
+        # If attn_mask exists and is larger than seq_len, slice it
+        if self.attn_mask is not None:
+            if self.attn_mask.shape[0] > seq_len:
+                attn_mask = self.attn_mask[:seq_len, :seq_len]
+            else:
+                attn_mask = self.attn_mask
+        else:
+            attn_mask = None
+        
+        x = self.transformer(x, attn_mask=attn_mask)
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
 
