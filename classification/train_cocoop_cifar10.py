@@ -55,12 +55,13 @@ def get_cifar10_dataloaders(data_root='./data', batch_size=128, num_workers=4):
     return trainloader, testloader
 
 
-def train_epoch(model, trainloader, optimizer, criterion, device, epoch):
+def train_epoch(model, trainloader, optimizer, criterion, device, epoch, max_grad_norm=1.0):
     """Train for one epoch."""
     model.train()
     total_loss = 0.0
     correct = 0
     total = 0
+    num_nan = 0
     
     pbar = tqdm(trainloader, desc=f'Epoch {epoch}')
     for images, labels in pbar:
@@ -72,8 +73,16 @@ def train_epoch(model, trainloader, optimizer, criterion, device, epoch):
         logits = model(images)
         loss = criterion(logits, labels)
         
+        # Skip update if loss is NaN (avoid corrupting parameters)
+        if not torch.isfinite(loss):
+            num_nan += 1
+            continue
+        
         # Backward pass
         loss.backward()
+        # Gradient clipping to prevent explosion
+        if max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
         
         # Statistics
@@ -87,8 +96,10 @@ def train_epoch(model, trainloader, optimizer, criterion, device, epoch):
             'acc': f'{100.*correct/total:.2f}%'
         })
     
-    avg_loss = total_loss / len(trainloader)
-    acc = 100. * correct / total
+    if num_nan > 0:
+        logger.warning(f'Epoch {epoch}: skipped {num_nan} batches due to NaN/Inf loss')
+    avg_loss = total_loss / max(len(trainloader) - num_nan, 1)
+    acc = 100. * correct / total if total > 0 else 0.0
     return avg_loss, acc
 
 
@@ -115,16 +126,17 @@ def main():
     parser.add_argument('--arch', type=str, default='ViT-B-16', help='CLIP architecture (use ViT-B-16 format, not ViT-B/16)')
     parser.add_argument('--weights', type=str, default='openai', help='CLIP weights')
     parser.add_argument('--data_root', type=str, default='./data', help='Data root directory')
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=512, help='Batch size')
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=0.002, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--wd', type=float, default=0.0005, help='Weight decay')
     parser.add_argument('--n_ctx', type=int, default=4, help='Number of context tokens')
     parser.add_argument('--ctx_init', type=str, default='a_photo_of_a', help='Context initialization')
     parser.add_argument('--class_token_pos', type=str, default='end', help='Class token position')
     parser.add_argument('--ckpt_dir', type=str, default='./checkpoints', help='Checkpoint directory')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='Device')
-    parser.add_argument('--precision', type=str, default='fp16', help='Precision (fp16 or fp32)')
+    parser.add_argument('--precision', type=str, default='fp32', help='Precision (fp16 or fp32)')
+    parser.add_argument('--max_grad_norm', type=float, default=1.0, help='Max gradient norm for clipping (0 to disable)')
     
     args = parser.parse_args()
     
@@ -186,7 +198,7 @@ def main():
         logger.info(f'\nEpoch {epoch}/{args.epochs}')
         
         # Train
-        train_loss, train_acc = train_epoch(model, trainloader, optimizer, criterion, device, epoch)
+        train_loss, train_acc = train_epoch(model, trainloader, optimizer, criterion, device, epoch, max_grad_norm=args.max_grad_norm)
         logger.info(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%')
         
         # Evaluate

@@ -287,6 +287,8 @@ class CoCoOpPromptLearner(PromptLearner):
         # Generate image-conditioned context vectors
         ctx_shift = self.meta_net(image_features)  # (B, n_ctx * ctx_dim)
         ctx_shift = ctx_shift.reshape(B, self.n_ctx, self.ctx_dim)  # (B, n_ctx, ctx_dim)
+        # Scale down to avoid large prompt values and numerical instability (common in CoCoOp)
+        ctx_shift = ctx_shift * 0.1
         
         # Base context vectors
         base_ctx = init if init is not None else self.ctx  # (n_ctx, ctx_dim) or (1, n_ctx, ctx_dim)
@@ -409,18 +411,19 @@ class ClipTestTimePromptTuning(nn.Module):
         if self.use_cocoop and image_features is not None:
             # Reshape back to (B, n_cls, dim)
             text_features = text_features.view(B, n_cls, -1)
-            # Normalize
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+            # Normalize (eps to avoid division by zero / NaN)
+            text_features = text_features / (text_features.norm(dim=-1, keepdim=True) + 1e-8)
         else:
-            # Normalize
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+            # Normalize (eps to avoid division by zero / NaN)
+            text_features = text_features / (text_features.norm(dim=-1, keepdim=True) + 1e-8)
         
         return text_features
 
     def forward(self, image, return_features=False):
         image = self.normalize(image.type(self.dtype))
         img_pre_features = self.image_encoder(image)
-        image_features = img_pre_features / img_pre_features.norm(dim=-1, keepdim=True)
+        # Normalize with eps to avoid division by zero / NaN
+        image_features = img_pre_features / (img_pre_features.norm(dim=-1, keepdim=True) + 1e-8)
         
         if self.use_cocoop:
             # CoCoOp: generate image-conditioned prompts
@@ -431,8 +434,8 @@ class ClipTestTimePromptTuning(nn.Module):
             for i in range(B):
                 img_feat_i = image_features[i:i+1]  # (1, dim)
                 text_feat_i = text_features[i]  # (n_cls, dim)
-                text_feat_i_norm = text_feat_i / text_feat_i.norm(dim=-1, keepdim=True)
-                logit_i = self.logit_scale.exp() * img_feat_i @ text_feat_i_norm.t()  # (1, n_cls)
+                text_feat_i_norm = text_feat_i / (text_feat_i.norm(dim=-1, keepdim=True) + 1e-8)
+                logit_i = self.logit_scale.exp().clamp(max=100.0) * img_feat_i @ text_feat_i_norm.t()  # (1, n_cls)
                 logits_list.append(logit_i)
             logits = torch.cat(logits_list, dim=0)  # (B, n_cls)
             # For BATCLIP losses: average text features over batch to get (n_cls, dim)
