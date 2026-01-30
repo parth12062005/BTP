@@ -126,7 +126,7 @@ def main():
     parser.add_argument('--arch', type=str, default='ViT-B-16', help='CLIP architecture (use ViT-B-16 format, not ViT-B/16)')
     parser.add_argument('--weights', type=str, default='openai', help='CLIP weights')
     parser.add_argument('--data_root', type=str, default='./data', help='Data root directory')
-    parser.add_argument('--batch_size', type=int, default=512, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size')
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--wd', type=float, default=0.0005, help='Weight decay')
