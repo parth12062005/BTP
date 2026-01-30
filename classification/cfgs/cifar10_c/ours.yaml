@@ -1,0 +1,29 @@
+CORRUPTION:
+  DATASET: cifar10_c
+  SEVERITY:
+    - 1
+    - 3
+    - 5
+  TYPE:
+    - gaussian_noise
+    - shot_noise
+    - impulse_noise
+MODEL:
+  ADAPTATION: ours
+  ARCH: ViT-B-16
+  WEIGHTS: openai
+  USE_CLIP: True
+  EPISODIC: False
+OPTIM:
+  LR: 1e-3
+  METHOD: AdamW  #1e-3, AdamW for vit-b16, 32
+  STEPS: 1
+  BETA: 0.9
+  WD: 0.01
+TEST:
+  BATCH_SIZE: 400
+CLIP:
+  PRECISION: "fp32"
+  FREEZE_TEXT_ENCODER: False
+  PROMPT_MODE: "custom"
+  PROMPT_TEMPLATE: ["a photo of a {}."]
