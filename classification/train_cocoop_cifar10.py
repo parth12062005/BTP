@@ -109,7 +109,7 @@ def evaluate(model, testloader, device):
 
 def main():
     parser = argparse.ArgumentParser(description='Train CoCoOp on CIFAR-10')
-    parser.add_argument('--arch', type=str, default='ViT-B/16', help='CLIP architecture')
+    parser.add_argument('--arch', type=str, default='ViT-B-16', help='CLIP architecture (use ViT-B-16 format, not ViT-B/16)')
     parser.add_argument('--weights', type=str, default='openai', help='CLIP weights')
     parser.add_argument('--data_root', type=str, default='./data', help='Data root directory')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
@@ -133,15 +133,18 @@ def main():
     logger.info(f'Using device: {device}')
     
     # Load CLIP model
-    logger.info(f'Loading CLIP model: {args.arch} with weights: {args.weights}')
+    # Convert arch format: ViT-B-16 -> ViT-B/16 for create_model_and_transforms
+    arch_for_clip = args.arch.replace('-', '/') if '-' in args.arch and 'ViT' in args.arch else args.arch
+    logger.info(f'Loading CLIP model: {arch_for_clip} (from {args.arch}) with weights: {args.weights}')
     clip_model, _, preprocess = create_model_and_transforms(
-        args.arch, pretrained=args.weights, device=device, precision=args.precision
+        arch_for_clip, pretrained=args.weights, device=device, precision=args.precision
     )
     
     # Get normalization from preprocess
     normalization = preprocess.transforms[-1]
     
     # Create CoCoOp model
+    # Use original arch format (ViT-B-16) for PromptLearner (it will convert internally if needed)
     logger.info('Creating CoCoOp model...')
     model = ClipTestTimePromptTuning(
         clip_model, normalization, args.arch, 'cifar10',

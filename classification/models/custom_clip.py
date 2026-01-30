@@ -47,7 +47,9 @@ class PromptLearner(nn.Module):
         self.device = clip_model.visual.conv1.weight.device
         self.ctx_dim = clip_model.ln_final.weight.shape[0]
         self.token_embedding = clip_model.token_embedding
-        self.tokenize = get_tokenizer(arch_name)
+        # Convert arch_name format (ViT-B/16 -> ViT-B-16) for get_tokenizer
+        tokenizer_arch = arch_name.replace('/', '-') if '/' in arch_name else arch_name
+        self.tokenize = get_tokenizer(tokenizer_arch)
 
         if ctx_init:
             # use given words to initialize context vectors
