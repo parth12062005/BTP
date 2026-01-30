@@ -54,7 +54,7 @@ def get_cifar10_loaders(data_dir, batch_size):
     return train_loader, test_loader
 
 
-def train_epoch(model, loader, optimizer, criterion, device, epoch):
+def train_epoch(model, loader, optimizer, criterion, device, epoch, trainable_params):
     model.train()
     total_loss, total_correct, total = 0.0, 0, 0
     pbar = tqdm(loader, desc=f"Epoch {epoch}", leave=False)
@@ -68,7 +68,7 @@ def train_epoch(model, loader, optimizer, criterion, device, epoch):
             logger.warning("Epoch %s: non-finite loss detected, skipping batch", epoch)
             continue
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.prompt_learner.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
         optimizer.step()
         total_loss += loss.item()
         pred = logits.argmax(dim=1)
@@ -117,19 +117,22 @@ def main():
     )
     model = model.to(device)
 
-    # Train only prompt learner
+    # Train only prompt learner: ctx + meta_net (exclude token_embedding, which is registered as submodule)
     for p in model.parameters():
         p.requires_grad = False
-    for p in model.prompt_learner.parameters():
-        p.requires_grad = True
-    n_trainable = sum(p.numel() for p in model.prompt_learner.parameters())
+    trainable_params = []
+    for name, p in model.prompt_learner.named_parameters():
+        if "token_embedding" not in name:
+            p.requires_grad = True
+            trainable_params.append(p)
+    n_trainable = sum(p.numel() for p in trainable_params)
     n_total = sum(p.numel() for p in model.parameters())
     logger.info("Trainable parameters: %s / %s (%.3f%%)", n_trainable, n_total, 100.0 * n_trainable / n_total)
 
     train_loader, test_loader = get_cifar10_loaders(args.data_dir, args.batch_size)
     logger.info("Loading CIFAR-10 dataset...")
 
-    optimizer = torch.optim.AdamW(model.prompt_learner.parameters(), lr=args.lr, weight_decay=0.01)
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.01)
     criterion = nn.CrossEntropyLoss()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -137,7 +140,7 @@ def main():
     best_acc = -1.0
 
     for epoch in range(1, args.epochs + 1):
-        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device, epoch)
+        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device, epoch, trainable_params)
         logger.info("Epoch %s: Train Loss: %.4f, Train Acc: %.2f%%", epoch, train_loss, train_acc)
         test_acc = evaluate(model, test_loader, device)
         logger.info("Test Acc: %.2f%%", test_acc)
