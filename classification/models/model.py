@@ -422,6 +422,35 @@ def get_model(cfg, num_classes: int, device: Union[str, torch.device]):
                     base_model.prompt_learner.ctx.copy_(pretrained_ctx)
                     base_model.prompt_learner.ctx_init_state = pretrained_ctx
                 logger.info("Successfully restored pre-trained soft prompt (CoOp)")
+        elif cfg.MODEL.ADAPTATION in ["CoCoOpBATCLIP", "cocoopbatclip", "cocoop_batclip"]:
+            # CoCoOp-BATCLIP: use CoCoOp prompt learner
+            base_model = ClipTestTimePromptTuning(base_model, normalization,
+                                                  cfg.MODEL.ARCH, cfg.CORRUPTION.DATASET,
+                                                  n_ctx=cfg.TPT.N_CTX, ctx_init=cfg.TPT.CTX_INIT,
+                                                  class_token_pos=cfg.TPT.CLASS_TOKEN_POS,
+                                                  use_cocoop=True)
+            if cfg.MODEL.CKPT_PATH:
+                # Optional: Initialize context prompts with CoOp pre-trained prompts
+                checkpoint = torch.load(cfg.MODEL.CKPT_PATH, map_location='cpu')
+                if 'state_dict' in checkpoint:
+                    state_dict = checkpoint['state_dict']
+                else:
+                    state_dict = checkpoint
+                
+                if 'ctx' in state_dict:
+                    pretrained_ctx = state_dict['ctx']
+                    assert pretrained_ctx.shape[0] == cfg.TPT.N_CTX
+                    with torch.no_grad():
+                        base_model.prompt_learner.ctx.copy_(pretrained_ctx)
+                        base_model.prompt_learner.ctx_init_state = pretrained_ctx
+                    logger.info("Successfully restored pre-trained soft prompt (CoOp) for CoCoOp-BATCLIP")
+                elif 'prompt_learner.ctx' in state_dict:
+                    pretrained_ctx = state_dict['prompt_learner.ctx']
+                    assert pretrained_ctx.shape[0] == cfg.TPT.N_CTX
+                    with torch.no_grad():
+                        base_model.prompt_learner.ctx.copy_(pretrained_ctx)
+                        base_model.prompt_learner.ctx_init_state = pretrained_ctx
+                    logger.info("Successfully restored pre-trained soft prompt (CoOp) for CoCoOp-BATCLIP")
         else:
             base_model = ZeroShotCLIP(cfg, base_model, device, normalize=normalization)
 

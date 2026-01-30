@@ -216,9 +216,125 @@ class PromptLearner(nn.Module):
         return prompts
 
 
+class CoCoOpPromptLearner(PromptLearner):
+    """
+    Image-conditioned prompt learner for CoCoOp.
+    Extends PromptLearner to generate image-specific context vectors via a meta network.
+    """
+    def __init__(self, clip_model, arch_name, class_names, n_ctx=16, ctx_init=None, class_token_pos='end', learned_cls=False):
+        super().__init__(clip_model, arch_name, class_names, n_ctx, ctx_init, class_token_pos, learned_cls)
+        
+        # Meta network to generate image-conditioned context vectors
+        # Input: image feature dimension, Output: n_ctx * ctx_dim
+        ctx_dim = self.ctx_dim
+        self.meta_net = nn.Sequential(
+            nn.Linear(ctx_dim, ctx_dim // 16),
+            nn.ReLU(inplace=True),
+            nn.Linear(ctx_dim // 16, n_ctx * ctx_dim)
+        )
+        
+        # Initialize meta_net weights
+        for m in self.meta_net.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
+    
+    def forward(self, image_features=None, init=None):
+        """
+        Forward pass for CoCoOp prompt learner.
+        
+        Args:
+            image_features: (B, dim) or (dim,) image features from encoder
+            init: Optional initial ctx vectors (for reset)
+        
+        Returns:
+            prompts: (B, n_cls, n_tok, dim) or (n_cls, n_tok, dim) prompt tensors
+        """
+        if image_features is None:
+            # Fallback to base class behavior (static prompts)
+            return super().forward(init=init)
+        
+        # Handle both batched and unbatched inputs
+        if image_features.dim() == 1:
+            image_features = image_features.unsqueeze(0)
+            squeeze_output = True
+        else:
+            squeeze_output = False
+        
+        B = image_features.shape[0]
+        
+        # Generate image-conditioned context vectors
+        ctx_shift = self.meta_net(image_features)  # (B, n_ctx * ctx_dim)
+        ctx_shift = ctx_shift.reshape(B, self.n_ctx, self.ctx_dim)  # (B, n_ctx, ctx_dim)
+        
+        # Base context vectors
+        base_ctx = init if init is not None else self.ctx  # (n_ctx, ctx_dim) or (1, n_ctx, ctx_dim)
+        
+        if base_ctx.dim() == 2:
+            base_ctx = base_ctx.unsqueeze(0).expand(B, -1, -1)  # (B, n_ctx, ctx_dim)
+        elif base_ctx.dim() == 3 and base_ctx.shape[0] == 1:
+            base_ctx = base_ctx.expand(B, -1, -1)
+        
+        # Add shift to base context
+        ctx = base_ctx + ctx_shift  # (B, n_ctx, ctx_dim)
+        
+        # Expand ctx to (B, n_cls, n_ctx, ctx_dim)
+        ctx = ctx.unsqueeze(1).expand(-1, self.n_cls, -1, -1)
+        
+        # Get prefix and suffix
+        prefix = self.token_prefix  # (n_cls, 1, dim)
+        suffix = self.token_suffix  # (n_cls, *, dim)
+        
+        # Expand prefix and suffix to batch dimension
+        prefix = prefix.unsqueeze(0).expand(B, -1, -1, -1)  # (B, n_cls, 1, dim)
+        suffix = suffix.unsqueeze(0).expand(B, -1, -1, -1)  # (B, n_cls, *, dim)
+        
+        if self.learned_cls:
+            assert self.class_token_position == "end"
+            cls = self.cls.unsqueeze(0).expand(B, -1, -1, -1)  # (B, n_cls, 1, dim)
+        
+        # Construct prompts based on class token position
+        if self.class_token_position == "end":
+            if self.learned_cls:
+                prompts = torch.cat([prefix, ctx, cls, suffix], dim=-2)  # (B, n_cls, n_tok, dim)
+            else:
+                prompts = torch.cat([prefix, ctx, suffix], dim=-2)  # (B, n_cls, n_tok, dim)
+        elif self.class_token_position == "middle":
+            half_n_ctx = self.split_idx if self.split_idx is not None else self.n_ctx // 2
+            prompts_list = []
+            for i in range(self.n_cls):
+                name_len = self.name_lens[i]
+                prefix_i = prefix[:, i:i+1, :, :]  # (B, 1, 1, dim)
+                class_i = suffix[:, i:i+1, :name_len, :]  # (B, 1, name_len, dim)
+                suffix_i = suffix[:, i:i+1, name_len:, :]  # (B, 1, *, dim)
+                ctx_i_half1 = ctx[:, i:i+1, :half_n_ctx, :]  # (B, 1, n_ctx//2, dim)
+                ctx_i_half2 = ctx[:, i:i+1, half_n_ctx:, :]  # (B, 1, n_ctx//2, dim)
+                prompt_i = torch.cat([prefix_i, ctx_i_half1, class_i, ctx_i_half2, suffix_i], dim=-2)
+                prompts_list.append(prompt_i)
+            prompts = torch.cat(prompts_list, dim=1)  # (B, n_cls, n_tok, dim)
+        elif self.class_token_position == "front":
+            prompts_list = []
+            for i in range(self.n_cls):
+                name_len = self.name_lens[i]
+                prefix_i = prefix[:, i:i+1, :, :]
+                class_i = suffix[:, i:i+1, :name_len, :]
+                suffix_i = suffix[:, i:i+1, name_len:, :]
+                ctx_i = ctx[:, i:i+1, :, :]
+                prompt_i = torch.cat([prefix_i, class_i, ctx_i, suffix_i], dim=-2)
+                prompts_list.append(prompt_i)
+            prompts = torch.cat(prompts_list, dim=1)  # (B, n_cls, n_tok, dim)
+        else:
+            raise ValueError(f"Class token position '{self.class_token_position}' is not supported.")
+        
+        if squeeze_output:
+            prompts = prompts.squeeze(0)  # (n_cls, n_tok, dim)
+        
+        return prompts
+
+
 class ClipTestTimePromptTuning(nn.Module):
     def __init__(self, clip_model, normalization, arch_name, dataset_name, n_ctx=16,
-                 ctx_init=None, class_token_pos='end', learned_cls=False):
+                 ctx_init=None, class_token_pos='end', learned_cls=False, use_cocoop=False):
         super(ClipTestTimePromptTuning, self).__init__()
 
         # setup the underlying CLIP model
@@ -226,12 +342,16 @@ class ClipTestTimePromptTuning(nn.Module):
         self.text_encoder = TextEncoder(clip_model)
         self.logit_scale = clip_model.logit_scale.data
         self.normalize = normalization
+        self.use_cocoop = use_cocoop
 
         # get the class names form the dataset name
         class_names = get_class_names(dataset_name)
 
-        # prompt tuning
-        self.prompt_learner = PromptLearner(clip_model, arch_name, class_names, n_ctx, ctx_init, class_token_pos, learned_cls)
+        # prompt tuning - use CoCoOp if requested
+        if use_cocoop:
+            self.prompt_learner = CoCoOpPromptLearner(clip_model, arch_name, class_names, n_ctx, ctx_init, class_token_pos, learned_cls)
+        else:
+            self.prompt_learner = PromptLearner(clip_model, arch_name, class_names, n_ctx, ctx_init, class_token_pos, learned_cls)
 
     @property
     def dtype(self):
@@ -244,17 +364,66 @@ class ClipTestTimePromptTuning(nn.Module):
     def reset_class_names(self, class_names):
         self.prompt_learner.reset_class_names(class_names)
 
-    def get_text_features(self):
-        prompts = self.prompt_learner()
-        tokenized_prompts = self.prompt_learner.tokenized_prompts
+    def get_text_features(self, image_features=None):
+        """
+        Get text features from prompts.
+        For CoCoOp, image_features are used to generate image-conditioned prompts.
+        """
+        if self.use_cocoop and image_features is not None:
+            prompts = self.prompt_learner(image_features=image_features)  # (B, n_cls, n_tok, dim)
+            B, n_cls, n_tok, dim = prompts.shape
+            # Reshape to (B * n_cls, n_tok, dim) for text encoder
+            prompts = prompts.view(B * n_cls, n_tok, dim)
+            # Expand tokenized prompts for batch
+            tokenized_prompts = self.prompt_learner.tokenized_prompts.unsqueeze(0).expand(B, -1, -1)
+            tokenized_prompts = tokenized_prompts.reshape(B * n_cls, -1)
+        else:
+            prompts = self.prompt_learner()
+            tokenized_prompts = self.prompt_learner.tokenized_prompts
+        
         text_features = self.text_encoder(prompts, tokenized_prompts)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        
+        if self.use_cocoop and image_features is not None:
+            # Reshape back to (B, n_cls, dim)
+            text_features = text_features.view(B, n_cls, -1)
+            # Normalize
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        else:
+            # Normalize
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        
         return text_features
 
-    def forward(self, image):
+    def forward(self, image, return_features=False):
         image = self.normalize(image.type(self.dtype))
-        image_features = self.image_encoder(image)
-        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-        text_features = self.get_text_features()
-        logits = self.logit_scale.exp() * image_features @ text_features.t()
-        return logits
+        img_pre_features = self.image_encoder(image)
+        image_features = img_pre_features / img_pre_features.norm(dim=-1, keepdim=True)
+        
+        if self.use_cocoop:
+            # CoCoOp: generate image-conditioned prompts
+            text_features = self.get_text_features(image_features=image_features)  # (B, n_cls, dim)
+            # Compute logits per image
+            B = image_features.shape[0]
+            logits_list = []
+            for i in range(B):
+                img_feat_i = image_features[i:i+1]  # (1, dim)
+                text_feat_i = text_features[i]  # (n_cls, dim)
+                text_feat_i_norm = text_feat_i / text_feat_i.norm(dim=-1, keepdim=True)
+                logit_i = self.logit_scale.exp() * img_feat_i @ text_feat_i_norm.t()  # (1, n_cls)
+                logits_list.append(logit_i)
+            logits = torch.cat(logits_list, dim=0)  # (B, n_cls)
+            # For BATCLIP losses: average text features over batch to get (n_cls, dim)
+            # This allows I2TLoss to work with class indexing
+            text_features_flat = text_features.mean(dim=0)  # (n_cls, dim) - average over batch
+            text_pre_features = text_features.mean(dim=0)  # Same for CoCoOp
+        else:
+            # Standard TPT: static prompts
+            text_features = self.get_text_features()
+            logits = self.logit_scale.exp() * image_features @ text_features.t()
+            text_features_flat = text_features
+            text_pre_features = text_features
+        
+        if return_features:
+            return logits, image_features, text_features_flat, img_pre_features, text_pre_features
+        else:
+            return logits
