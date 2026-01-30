@@ -280,6 +280,10 @@ class CoCoOpPromptLearner(PromptLearner):
         
         B = image_features.shape[0]
         
+        # Ensure same dtype as meta_net (image_features may be half when CLIP uses fp16)
+        meta_dtype = next(self.meta_net.parameters()).dtype
+        image_features = image_features.to(meta_dtype)
+        
         # Generate image-conditioned context vectors
         ctx_shift = self.meta_net(image_features)  # (B, n_ctx * ctx_dim)
         ctx_shift = ctx_shift.reshape(B, self.n_ctx, self.ctx_dim)  # (B, n_ctx, ctx_dim)
@@ -294,6 +298,8 @@ class CoCoOpPromptLearner(PromptLearner):
         
         # Add shift to base context
         ctx = base_ctx + ctx_shift  # (B, n_ctx, ctx_dim)
+        # Cast to model dtype so concat with prefix/suffix (from token_embedding) matches
+        ctx = ctx.to(self.dtype)
         
         # Expand ctx to (B, n_cls, n_ctx, ctx_dim)
         ctx = ctx.unsqueeze(1).expand(-1, self.n_cls, -1, -1)
