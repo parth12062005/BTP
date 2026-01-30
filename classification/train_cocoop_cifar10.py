@@ -23,15 +23,18 @@ logger = logging.getLogger(__name__)
 
 
 def get_cifar10_dataloaders(data_root='./data', batch_size=128, num_workers=4):
-    """Get CIFAR-10 train and test dataloaders."""
-    # CIFAR-10 normalization (will be handled by model)
+    """Get CIFAR-10 train and test dataloaders.
+    Images are resized to 224x224 so CLIP ViT receives the expected input size.
+    """
+    # CLIP ViT expects 224x224 input; CIFAR-10 is 32x32 so we must resize
     transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
+        transforms.Resize((224, 224)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
     ])
     
     transform_test = transforms.Compose([
+        transforms.Resize((224, 224)),
         transforms.ToTensor(),
     ])
     
