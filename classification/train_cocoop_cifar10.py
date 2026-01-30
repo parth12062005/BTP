@@ -115,6 +115,7 @@ def main():
         class_token_pos="end",
         use_cocoop=True,
     )
+    model = model.to(device)
 
     # Train only prompt learner
     for p in model.parameters():
