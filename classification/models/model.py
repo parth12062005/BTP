@@ -417,10 +417,12 @@ def get_model(cfg, num_classes: int, device: Union[str, torch.device]):
                 # Initiaize context prompts with CoOp pre-trained prompts (see: https://github.com/KaiyangZhou/CoOp?tab=readme-ov-file)
                 # or download them from here: https://drive.google.com/file/d/18ypxfd82RR0pizc5MM1ZWDYDk4j0BtPF/view
                 pretrained_ctx = torch.load(cfg.MODEL.CKPT_PATH)['state_dict']['ctx']
-                assert pretrained_ctx.shape[0] == cfg.TPT.N_CTX
+                assert pretrained_ctx.shape[0] >= cfg.TPT.N_CTX, (
+                    f"Pretrained ctx has {pretrained_ctx.shape[0]} tokens, need >= {cfg.TPT.N_CTX}")
+                load_ctx = pretrained_ctx[:cfg.TPT.N_CTX]
                 with torch.no_grad():
-                    base_model.prompt_learner.ctx.copy_(pretrained_ctx)
-                    base_model.prompt_learner.ctx_init_state = pretrained_ctx
+                    base_model.prompt_learner.ctx.copy_(load_ctx)
+                    base_model.prompt_learner.ctx_init_state = load_ctx.clone()
                 logger.info("Successfully restored pre-trained soft prompt (CoOp)")
         elif cfg.MODEL.ADAPTATION in ["CoCoOpBATCLIP", "cocoopbatclip", "cocoop_batclip"]:
             # CoCoOp-BATCLIP: use CoCoOp prompt learner
@@ -430,26 +432,32 @@ def get_model(cfg, num_classes: int, device: Union[str, torch.device]):
                                                   class_token_pos=cfg.TPT.CLASS_TOKEN_POS,
                                                   use_cocoop=True)
             if cfg.MODEL.CKPT_PATH:
-                # Optional: Initialize context prompts with CoOp pre-trained prompts
+                # Load ctx and meta_net from CoOp/CoCoOp checkpoint (ours or external e.g. multimodal-prompt-learning).
+                # Architecture now matches external: one shared bias per image (meta_net.linear1, linear2).
                 checkpoint = torch.load(cfg.MODEL.CKPT_PATH, map_location='cpu')
                 if 'state_dict' in checkpoint:
                     state_dict = checkpoint['state_dict']
                 else:
                     state_dict = checkpoint
-                
-                if 'ctx' in state_dict:
-                    pretrained_ctx = state_dict['ctx']
-                    assert pretrained_ctx.shape[0] == cfg.TPT.N_CTX
+                # Strip keys we don't load (class-name dependent)
+                state_dict = {k: v for k, v in state_dict.items() if k not in ("token_prefix", "token_suffix")}
+                # Resolve ctx key (top-level or nested)
+                ctx_key = "ctx" if "ctx" in state_dict else "prompt_learner.ctx" if "prompt_learner.ctx" in state_dict else None
+                if ctx_key:
+                    pretrained_ctx = state_dict[ctx_key]
+                    assert pretrained_ctx.shape[0] >= cfg.TPT.N_CTX, (
+                        f"Pretrained ctx has {pretrained_ctx.shape[0]} tokens, need >= {cfg.TPT.N_CTX}")
+                    load_ctx = pretrained_ctx[:cfg.TPT.N_CTX]
                     with torch.no_grad():
-                        base_model.prompt_learner.ctx.copy_(pretrained_ctx)
-                        base_model.prompt_learner.ctx_init_state = pretrained_ctx
-                    logger.info("Successfully restored pre-trained soft prompt (CoOp) for CoCoOp-BATCLIP")
-                elif 'prompt_learner.ctx' in state_dict:
-                    pretrained_ctx = state_dict['prompt_learner.ctx']
-                    assert pretrained_ctx.shape[0] == cfg.TPT.N_CTX
-                    with torch.no_grad():
-                        base_model.prompt_learner.ctx.copy_(pretrained_ctx)
-                        base_model.prompt_learner.ctx_init_state = pretrained_ctx
+                        base_model.prompt_learner.ctx.copy_(load_ctx)
+                        base_model.prompt_learner.ctx_init_state = load_ctx.clone()
+                # Load meta_net if present and shapes match (external CoCoOp uses meta_net.linear1, linear2)
+                pl_sd = base_model.prompt_learner.state_dict()
+                to_load = {k: v for k, v in state_dict.items()
+                           if k.startswith("meta_net.") and k in pl_sd and pl_sd[k].shape == v.shape}
+                if to_load:
+                    base_model.prompt_learner.load_state_dict(to_load, strict=False)
+                if ctx_key or to_load:
                     logger.info("Successfully restored pre-trained soft prompt (CoOp) for CoCoOp-BATCLIP")
         else:
             base_model = ZeroShotCLIP(cfg, base_model, device, normalize=normalization)

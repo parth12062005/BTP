@@ -6,6 +6,7 @@ Paper: https://arxiv.org/pdf/2209.07511.pdf
 import torch
 import torch.nn as nn
 import logging
+from collections import OrderedDict
 
 from open_clip import create_model_and_transforms, get_tokenizer
 from datasets.cls_names import get_class_names
@@ -236,25 +237,21 @@ class PromptLearner(nn.Module):
 class CoCoOpPromptLearner(PromptLearner):
     """
     Image-conditioned prompt learner for CoCoOp.
-    Extends PromptLearner to generate image-specific context vectors via a meta network.
+    Matches external CoCoOp (e.g. multimodal-prompt-learning): one shared bias π per image,
+    v_m(x) = v_m + π. Meta-net: Linear(vis_dim, vis_dim//16) -> ReLU -> Linear(vis_dim//16, ctx_dim).
     """
     def __init__(self, clip_model, arch_name, class_names, n_ctx=16, ctx_init=None, class_token_pos='end', learned_cls=False):
         super().__init__(clip_model, arch_name, class_names, n_ctx, ctx_init, class_token_pos, learned_cls)
         
-        # Meta network to generate image-conditioned context vectors
-        # Input: image feature dimension, Output: n_ctx * ctx_dim
+        # Meta network: same architecture as external CoCoOp (one output vector per image, added to all context tokens)
+        # Input: image feature dim (vis_dim); output: ctx_dim. Keys linear1/linear2 for checkpoint compatibility.
         ctx_dim = self.ctx_dim
-        self.meta_net = nn.Sequential(
-            nn.Linear(ctx_dim, ctx_dim // 16),
-            nn.ReLU(inplace=True),
-            nn.Linear(ctx_dim // 16, n_ctx * ctx_dim)
-        )
-        
-        # Initialize meta_net weights
-        for m in self.meta_net.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                nn.init.zeros_(m.bias)
+        vis_dim = ctx_dim  # open_clip ViT: image encoder output dim equals transformer width
+        self.meta_net = nn.Sequential(OrderedDict([
+            ("linear1", nn.Linear(vis_dim, vis_dim // 16)),
+            ("relu", nn.ReLU(inplace=True)),
+            ("linear2", nn.Linear(vis_dim // 16, ctx_dim))
+        ]))
     
     def forward(self, image_features=None, init=None):
         """
@@ -284,22 +281,12 @@ class CoCoOpPromptLearner(PromptLearner):
         meta_dtype = next(self.meta_net.parameters()).dtype
         image_features = image_features.to(meta_dtype)
         
-        # Generate image-conditioned context vectors
-        ctx_shift = self.meta_net(image_features)  # (B, n_ctx * ctx_dim)
-        ctx_shift = ctx_shift.reshape(B, self.n_ctx, self.ctx_dim)  # (B, n_ctx, ctx_dim)
-        # Scale down to avoid large prompt values and numerical instability (common in CoCoOp)
-        ctx_shift = ctx_shift * 0.1
-        
-        # Base context vectors
-        base_ctx = init if init is not None else self.ctx  # (n_ctx, ctx_dim) or (1, n_ctx, ctx_dim)
-        
-        if base_ctx.dim() == 2:
-            base_ctx = base_ctx.unsqueeze(0).expand(B, -1, -1)  # (B, n_ctx, ctx_dim)
-        elif base_ctx.dim() == 3 and base_ctx.shape[0] == 1:
-            base_ctx = base_ctx.expand(B, -1, -1)
-        
-        # Add shift to base context
-        ctx = base_ctx + ctx_shift  # (B, n_ctx, ctx_dim)
+        # Same as external CoCoOp: one bias π per image, added to all context tokens (v_m(x) = v_m + π)
+        bias = self.meta_net(image_features)  # (B, ctx_dim)
+        bias = bias.unsqueeze(1)  # (B, 1, ctx_dim)
+        base_ctx = init if init is not None else self.ctx  # (n_ctx, ctx_dim)
+        ctx = base_ctx.unsqueeze(0)  # (1, n_ctx, ctx_dim)
+        ctx = ctx + bias  # (B, n_ctx, ctx_dim)
         # Cast to model dtype so concat with prefix/suffix (from token_embedding) matches
         ctx = ctx.to(self.dtype)
         
