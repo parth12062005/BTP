@@ -135,7 +135,7 @@ def main():
     parser.add_argument('--class_token_pos', type=str, default='end', help='Class token position')
     parser.add_argument('--ckpt_dir', type=str, default='./checkpoints', help='Checkpoint directory')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='Device')
-    parser.add_argument('--precision', type=str, default='fp32', help='Precision (fp16 or fp32)')
+    parser.add_argument('--precision', type=str, default='fp16', help='Precision (fp16 or fp32)')
     parser.add_argument('--max_grad_norm', type=float, default=1.0, help='Max gradient norm for clipping (0 to disable)')
     
     args = parser.parse_args()
