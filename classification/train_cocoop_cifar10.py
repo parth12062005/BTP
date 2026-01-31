@@ -29,7 +29,7 @@ def parse_args():
     p.add_argument("--n_ctx", type=int, default=4, help="Number of context tokens")
     p.add_argument("--ctx_init", type=str, default="a photo of a", help="Context init phrase (use _ for spaces)")
     p.add_argument("--epochs", type=int, default=50)
-    p.add_argument("--batch_size", type=int, default=128)
+    p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument("--save_dir", type=str, default="./checkpoints", help="Dir to save best checkpoint")
     p.add_argument("--data_dir", type=str, default="./data", help="CIFAR-10 root")
