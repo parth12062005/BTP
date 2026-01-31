@@ -94,8 +94,8 @@ class CoCoOpBATCLIP(TTAMethod):
             #     loss = loss - i2t_loss_val
                 
             #     # InterMean Loss: push class means apart
-                inter_mean_loss_val = self.inter_mean_loss(logits, img_pre_features)
-                loss = loss - inter_mean_loss_val
+                # inter_mean_loss_val = self.inter_mean_loss(logits, img_pre_features)
+                # loss = loss - inter_mean_loss_val
             
             #Optional TPT-style avg-entropy on confident samples
             # if self.lambda_ent > 0 and self.selection_p > 0:
