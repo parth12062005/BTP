@@ -58,21 +58,21 @@ class CoCoOpBATCLIP(TTAMethod):
                 # Main entropy loss
                 loss = self.entropy_loss(logits).mean(0)
                 
-                # BATCLIP losses (only if not unimodal image-only mode)
-                if not self.unimodal_image_only:
-                    # I2T Loss: image-text alignment
-                    i2t_loss_val = self.i2t_loss(logits, img_pre_features, text_features_flat)
-                    loss = loss - i2t_loss_val
+                # # BATCLIP losses (only if not unimodal image-only mode)
+                # if not self.unimodal_image_only:
+                #     # I2T Loss: image-text alignment
+                #     i2t_loss_val = self.i2t_loss(logits, img_pre_features, text_features_flat)
+                #     loss = loss - i2t_loss_val
                     
-                    # InterMean Loss: push class means apart
-                    inter_mean_loss_val = self.inter_mean_loss(logits, img_pre_features)
-                    loss = loss - inter_mean_loss_val
+                #     # InterMean Loss: push class means apart
+                #     inter_mean_loss_val = self.inter_mean_loss(logits, img_pre_features)
+                #     loss = loss - inter_mean_loss_val
                 
                 # # Optional TPT-style avg-entropy on confident samples
                 # if self.lambda_ent > 0 and self.selection_p > 0:
-                # logits_conf, _ = select_confident_samples(logits, self.selection_p)
-                # avg_ent_val = avg_entropy(logits_conf)
-                # loss = avg_ent_val
+                logits_conf, _ = select_confident_samples(logits, self.selection_p)
+                avg_ent_val = avg_entropy(logits_conf)
+                loss = loss+ 0.5*avg_ent_val
         else:
             # Main entropy loss
             loss = self.entropy_loss(logits).mean(0)
@@ -92,9 +92,9 @@ class CoCoOpBATCLIP(TTAMethod):
             #     logits_conf, _ = select_confident_samples(logits, self.selection_p)
             #     avg_ent_val = avg_entropy(logits_conf)
             #     loss = loss + self.lambda_ent * avg_ent_val
-            # logits_conf, _ = select_confident_samples(logits, self.selection_p)
-            # avg_ent_val = avg_entropy(logits_conf)
-            # loss = avg_ent_val
+            logits_conf, _ = select_confident_samples(logits, self.selection_p)
+            avg_ent_val = avg_entropy(logits_conf)
+            loss = loss+ 0.5*avg_ent_val
         
         # Backward and optimizer step (skip when no trainable params)
         if self.optimizer is not None:
