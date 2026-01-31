@@ -1,8 +1,4 @@
-"""
-Standalone script to train CoCoOp on CIFAR-10 (supervised).
-Trains only prompt learner (ctx + meta_net). Saves checkpoint compatible with
-CoCoOp-BATCLIP TTA loading in get_model() (state_dict: ctx, meta_net.linear1/linear2, etc.).
-"""
+
 import argparse
 import logging
 import os
