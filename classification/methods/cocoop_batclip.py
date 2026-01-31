@@ -147,7 +147,7 @@ class CoCoOpBATCLIP(TTAMethod):
                         params.append(p)
                         names.append(f"{nm}.{np}")
         
-        Collect prompt learner parameters (excluding token_embedding)
+        #Collect prompt learner parameters (excluding token_embedding)
         for name, param in self.model.named_parameters():
             if "prompt_learner" in name and "token_embedding" not in name and param.requires_grad:
                 params.append(param)
