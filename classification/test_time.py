@@ -3,6 +3,7 @@ import torch
 import logging
 import numpy as np
 import methods
+from tqdm import tqdm
 
 from models.model import get_model
 from utils.misc import print_memory_info
@@ -68,6 +69,9 @@ def evaluate(description):
     errs_5 = []
     domain_dict = {}
 
+    n_runs = len(domain_seq_loop) * len(severities)
+    outer_pbar = tqdm(total=n_runs, desc="corruption/severity", unit="run", dynamic_ncols=True)
+
     # start evaluation
     for i_dom, domain_name in enumerate(domain_seq_loop):
         if i_dom == 0 or "reset_each_shift" in cfg.SETTING:
@@ -80,6 +84,8 @@ def evaluate(description):
             logger.warning("not resetting model")
 
         for severity in severities:
+            outer_pbar.set_postfix_str(f"{domain_name}{severity}", refresh=True)
+
             test_data_loader = get_test_loader(
                 setting=cfg.SETTING,
                 adaptation=cfg.MODEL.ADAPTATION,
@@ -99,7 +105,7 @@ def evaluate(description):
                 workers=min(cfg.TEST.NUM_WORKERS, os.cpu_count())
             )
 
-            if i_dom == 0:
+            if i_dom == 0 and severity == severities[0]:
                 # Note that the input normalization is done inside of the model
                 logger.info(f"Using the following data transformation:\n{test_data_loader.dataset.transform}")
 
@@ -112,7 +118,8 @@ def evaluate(description):
                 setting=cfg.SETTING,
                 domain_dict=domain_dict,
                 print_every=cfg.PRINT_EVERY,
-                device=device
+                device=device,
+                progress_desc=f"{domain_name}{severity}"
             )
 
             err = 1. - acc
@@ -121,7 +128,9 @@ def evaluate(description):
                 errs_5.append(err)
 
             logger.info(f"{cfg.CORRUPTION.DATASET} error % [{domain_name}{severity}][#samples={num_samples}]: {err:.2%}")
+            outer_pbar.update(1)
 
+    outer_pbar.close()
     if len(errs_5) > 0:
         logger.info(f"mean error: {np.mean(errs):.2%}, mean error at 5: {np.mean(errs_5):.2%}")
     else:
