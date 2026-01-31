@@ -32,6 +32,8 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument("--save_dir", type=str, default="./checkpoints", help="Dir to save best checkpoint")
+    p.add_argument("--text_ckpt", type=str, default="text_cocoop_cifar10_best.pth", help="Checkpoint filename for text CoCoOp (prompt_learner)")
+    p.add_argument("--image_ckpt", type=str, default="image_cocoop_cifar10_best.pth", help="Checkpoint filename for image CoCoOp (reverse_meta_net)")
     p.add_argument("--data_dir", type=str, default="./data", help="CIFAR-10 root")
     p.add_argument("--precision", type=str, default="fp32", choices=["fp32", "fp16"], help="Training precision")
     return p.parse_args()
@@ -139,26 +141,61 @@ def main():
     criterion = nn.CrossEntropyLoss()
 
     os.makedirs(args.save_dir, exist_ok=True)
-    save_path = os.path.join(args.save_dir, "text_image_cocoop_cifar10_best.pth")
+    save_path_text = os.path.join(args.save_dir, args.text_ckpt)
+    save_path_image = os.path.join(args.save_dir, args.image_ckpt)
+    start_epoch = 0
     best_acc = -1.0
 
-    for epoch in range(1, args.epochs + 1):
+    # Load from separate checkpoints if available (text CoCoOp and image CoCoOp)
+    if os.path.isfile(save_path_text):
+        logger.info("Loading text CoCoOp from %s", save_path_text)
+        ckpt = torch.load(save_path_text, map_location=device)
+        if "state_dict" in ckpt:
+            sd = ckpt["state_dict"]
+            pl_sd = model.prompt_learner.state_dict()
+            pl_load = {k: v for k, v in sd.items() if k in pl_sd and k not in ("token_prefix", "token_suffix") and pl_sd[k].shape == v.shape}
+            if pl_load:
+                model.prompt_learner.load_state_dict(pl_load, strict=False)
+                logger.info("Loaded %s keys into text CoCoOp (prompt_learner).", len(pl_load))
+            start_epoch = ckpt.get("epoch", start_epoch)
+            best_acc = ckpt.get("best_acc", best_acc)
+        else:
+            logger.warning("Text checkpoint has no 'state_dict'.")
+    else:
+        logger.info("No text CoCoOp checkpoint at %s; starting text CoCoOp from scratch.", save_path_text)
+
+    if os.path.isfile(save_path_image):
+        logger.info("Loading image CoCoOp from %s", save_path_image)
+        ckpt = torch.load(save_path_image, map_location=device)
+        if "state_dict" in ckpt:
+            sd = ckpt["state_dict"]
+            rmn_sd = model.reverse_meta_net.state_dict()
+            rmn_load = {k: v for k, v in sd.items() if k in rmn_sd and rmn_sd[k].shape == v.shape}
+            if rmn_load:
+                model.reverse_meta_net.load_state_dict(rmn_load, strict=False)
+                logger.info("Loaded %s keys into image CoCoOp (reverse_meta_net).", len(rmn_load))
+            start_epoch = max(start_epoch, ckpt.get("epoch", 0))
+            best_acc = max(best_acc, ckpt.get("best_acc", -1.0))
+        else:
+            logger.warning("Image checkpoint has no 'state_dict'.")
+    else:
+        logger.info("No image CoCoOp checkpoint at %s; starting image CoCoOp from scratch.", save_path_image)
+
+    if start_epoch > 0 or best_acc > -1.0:
+        logger.info("Resuming from epoch %s, best_acc so far: %.2f%%", start_epoch, best_acc)
+
+    for epoch in range(start_epoch + 1, args.epochs + 1):
         train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device, epoch, trainable_params)
         logger.info("Epoch %s: Train Loss: %.4f, Train Acc: %.2f%%", epoch, train_loss, train_acc)
         test_acc = evaluate(model, test_loader, device)
         logger.info("Test Acc: %.2f%%", test_acc)
         if test_acc > best_acc:
             best_acc = test_acc
-            state = {
-                "state_dict": {
-                    **{f"prompt_learner.{k}": v for k, v in model.prompt_learner.state_dict().items()},
-                    **{f"reverse_meta_net.{k}": v for k, v in model.reverse_meta_net.state_dict().items()},
-                },
-                "epoch": epoch,
-                "arch": args.arch,
-            }
-            torch.save(state, save_path)
-            logger.info("Saved best checkpoint to %s", save_path)
+            # Save text CoCoOp and image CoCoOp in separate checkpoints
+            meta = {"epoch": epoch, "best_acc": best_acc, "arch": args.arch}
+            torch.save({"state_dict": model.prompt_learner.state_dict(), **meta}, save_path_text)
+            torch.save({"state_dict": model.reverse_meta_net.state_dict(), **meta}, save_path_image)
+            logger.info("Saved text CoCoOp to %s and image CoCoOp to %s (acc: %.2f%%)", save_path_text, save_path_image, best_acc)
 
     logger.info("Done. Best test acc: %.2f%%", best_acc)
 
