@@ -116,19 +116,19 @@ class CoCoOpBATCLIP(TTAMethod):
         self.model.requires_grad_(False)
         
         # Enable train mode and gradients for normalization layers
-        for nm, m in self.model.named_modules():
-            if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.LayerNorm, nn.GroupNorm)):
-                m.train()
-                m.requires_grad_(True)
-                if isinstance(m, nn.BatchNorm2d):
-                    m.track_running_stats = False
-                    m.running_mean = None
-                    m.running_var = None
+        # for nm, m in self.model.named_modules():
+        #     if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.LayerNorm, nn.GroupNorm)):
+        #         m.train()
+        #         m.requires_grad_(True)
+        #         if isinstance(m, nn.BatchNorm2d):
+        #             m.track_running_stats = False
+        #             m.running_mean = None
+        #             m.running_var = None
         
-        # Enable gradients for prompt learner parameters (excluding token_embedding)
-        # for name, param in self.model.named_parameters():
-        #     if "prompt_learner" in name and "token_embedding" not in name:
-        #         param.requires_grad_(True)
+        Enable gradients for prompt learner parameters (excluding token_embedding)
+        for name, param in self.model.named_parameters():
+            if "prompt_learner" in name and "meta_net.linear2" not in name:
+                param.requires_grad_(True)
     
     def collect_params(self):
         """
