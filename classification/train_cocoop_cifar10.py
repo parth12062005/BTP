@@ -31,6 +31,7 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument("--save_dir", type=str, default="./checkpoints", help="Dir to save best checkpoint")
+    p.add_argument("--ckpt_name", type=str, default="cocoop_cifar10_best.pth", help="Checkpoint filename to save/load")
     p.add_argument("--data_dir", type=str, default="./data", help="CIFAR-10 root")
     p.add_argument("--precision", type=str, default="fp32", choices=["fp32", "fp16"], help="Training precision")
     return p.parse_args()
@@ -137,10 +138,32 @@ def main():
     criterion = nn.CrossEntropyLoss()
 
     os.makedirs(args.save_dir, exist_ok=True)
-    save_path = os.path.join(args.save_dir, "cocoop_cifar10_best.pth")
+    save_path = os.path.join(args.save_dir, args.ckpt_name)
+    start_epoch = 0
     best_acc = -1.0
 
-    for epoch in range(1, args.epochs + 1):
+    # If existing CoCoOp checkpoint exists, load it and resume training (improve from that point)
+    if os.path.isfile(save_path):
+        logger.info("Found existing checkpoint %s; loading and resuming training.", save_path)
+        ckpt = torch.load(save_path, map_location=device)
+        if "state_dict" in ckpt:
+            sd = ckpt["state_dict"]
+            # Strip keys that may not match (token_prefix, token_suffix are class-name dependent)
+            sd = {k: v for k, v in sd.items() if k not in ("token_prefix", "token_suffix")}
+            pl_sd = model.prompt_learner.state_dict()
+            to_load = {k: v for k, v in sd.items() if k in pl_sd and pl_sd[k].shape == v.shape}
+            if to_load:
+                model.prompt_learner.load_state_dict(to_load, strict=False)
+                logger.info("Loaded %s keys from checkpoint into prompt_learner.", len(to_load))
+            start_epoch = ckpt.get("epoch", 0)
+            best_acc = ckpt.get("best_acc", -1.0)
+            logger.info("Resuming from epoch %s, best_acc so far: %.2f%%", start_epoch, best_acc)
+        else:
+            logger.warning("Checkpoint has no 'state_dict'; starting from scratch.")
+    else:
+        logger.info("No existing checkpoint at %s; starting new training.", save_path)
+
+    for epoch in range(start_epoch + 1, args.epochs + 1):
         train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device, epoch, trainable_params)
         logger.info("Epoch %s: Train Loss: %.4f, Train Acc: %.2f%%", epoch, train_loss, train_acc)
         test_acc = evaluate(model, test_loader, device)
@@ -150,11 +173,12 @@ def main():
             state = {
                 "state_dict": model.prompt_learner.state_dict(),
                 "epoch": epoch,
+                "best_acc": best_acc,
                 "n_ctx": args.n_ctx,
                 "arch": args.arch,
             }
             torch.save(state, save_path)
-            logger.info("Saved best checkpoint to %s", save_path)
+            logger.info("Saved best checkpoint to %s (acc: %.2f%%)", save_path, best_acc)
 
     logger.info("Done. Best test acc: %.2f%%", best_acc)
 
