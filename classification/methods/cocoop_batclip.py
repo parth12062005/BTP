@@ -126,9 +126,9 @@ class CoCoOpBATCLIP(TTAMethod):
         #             m.running_var = None
         
         # Enable gradients for prompt learner parameters (excluding token_embedding)
-        for name, param in self.model.named_parameters():
-            if "prompt_learner" in name and "meta_net.linear2" not in name:
-                param.requires_grad_(True)
+        # for name, param in self.model.named_parameters():
+        #     if "prompt_learner" in name and "meta_net.linear2" not in name:
+        #         param.requires_grad_(True)
     
     def collect_params(self):
         """
