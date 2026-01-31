@@ -347,9 +347,33 @@ class CoCoOpPromptLearner(PromptLearner):
         return prompts
 
 
+class ReverseMetaNet(nn.Module):
+    """
+    Opposite of CoCoOp meta_net: takes TEXT embedding and outputs a delta for IMAGE embedding.
+    Used for 'image CoCoOp': text conditions the image (adapted_img = img_feats + reverse_meta_net(text_context)).
+    Same 3-layer + LayerNorm structure as meta_net; input_dim = text/ctx_dim, output_dim = vis_dim.
+    """
+    def __init__(self, text_dim, image_dim):
+        super().__init__()
+        h1, h2 = text_dim // 4, text_dim // 16
+        self.net = nn.Sequential(OrderedDict([
+            ("linear1", nn.Linear(text_dim, h1)),
+            ("norm1", nn.LayerNorm(h1)),
+            ("relu1", nn.ReLU(inplace=True)),
+            ("linear2", nn.Linear(h1, h2)),
+            ("norm2", nn.LayerNorm(h2)),
+            ("relu2", nn.ReLU(inplace=True)),
+            ("linear3", nn.Linear(h2, image_dim)),
+        ]))
+
+    def forward(self, text_features):
+        """text_features: (B, dim) or (1, dim). Returns delta (same shape) to add to image features."""
+        return self.net(text_features)
+
+
 class ClipTestTimePromptTuning(nn.Module):
     def __init__(self, clip_model, normalization, arch_name, dataset_name, n_ctx=16,
-                 ctx_init=None, class_token_pos='end', learned_cls=False, use_cocoop=False):
+                 ctx_init=None, class_token_pos='end', learned_cls=False, use_cocoop=False, use_reverse_cocoop=False):
         super(ClipTestTimePromptTuning, self).__init__()
 
         # setup the underlying CLIP model
@@ -358,15 +382,24 @@ class ClipTestTimePromptTuning(nn.Module):
         self.logit_scale = clip_model.logit_scale.data
         self.normalize = normalization
         self.use_cocoop = use_cocoop
+        self.use_reverse_cocoop = use_reverse_cocoop
 
         # get the class names form the dataset name
         class_names = get_class_names(dataset_name)
+        ctx_dim = clip_model.ln_final.weight.shape[0]
+        vis_dim = ctx_dim  # ViT: same as image encoder output dim
 
-        # prompt tuning - use CoCoOp if requested
+        # prompt tuning - use CoCoOp if requested (image conditions text)
         if use_cocoop:
             self.prompt_learner = CoCoOpPromptLearner(clip_model, arch_name, class_names, n_ctx, ctx_init, class_token_pos, learned_cls)
         else:
             self.prompt_learner = PromptLearner(clip_model, arch_name, class_names, n_ctx, ctx_init, class_token_pos, learned_cls)
+
+        # reverse CoCoOp: text conditions image (text -> delta -> add to image embedding)
+        if use_reverse_cocoop:
+            self.reverse_meta_net = ReverseMetaNet(text_dim=ctx_dim, image_dim=vis_dim)
+        else:
+            self.reverse_meta_net = None
 
     @property
     def dtype(self):
@@ -378,6 +411,20 @@ class ClipTestTimePromptTuning(nn.Module):
 
     def reset_class_names(self, class_names):
         self.prompt_learner.reset_class_names(class_names)
+
+    def get_text_features_zeroshot(self):
+        """
+        Simple text embedder: template "a photo of a {class}." with no learnable ctx.
+        No CoOp/CoCoOp; used when use_reverse_cocoop=True.
+        """
+        pl = self.prompt_learner
+        class_names = [n.replace("_", " ") for n in pl.class_names]
+        prompts_str = ["a photo of a " + n + "." for n in class_names]
+        tokenized_prompts = torch.cat([pl.tokenize(p) for p in prompts_str]).to(pl.ctx.device)
+        prompts = pl.token_embedding(tokenized_prompts).type(self.dtype)
+        text_features = self.text_encoder(prompts, tokenized_prompts)
+        text_features = text_features / (text_features.norm(dim=-1, keepdim=True) + 1e-8)
+        return text_features
 
     def get_text_features(self, image_features=None):
         """
@@ -414,8 +461,19 @@ class ClipTestTimePromptTuning(nn.Module):
         img_pre_features = self.image_encoder(image)
         # Normalize with eps to avoid division by zero / NaN
         image_features = img_pre_features / (img_pre_features.norm(dim=-1, keepdim=True) + 1e-8)
-        
-        if self.use_cocoop:
+
+        if self.use_reverse_cocoop:
+            # Simple text embedder (zero-shot template) + reverse_meta_net-tuned image; no CoCoOp
+            text_features = self.get_text_features_zeroshot()  # (n_cls, dim), "a photo of a {class}."
+            text_context = text_features.mean(dim=0, keepdim=True)  # (1, dim)
+            delta = self.reverse_meta_net(text_context.to(self.reverse_meta_net.net[0].weight.dtype))  # (1, dim)
+            adapted_image_features = image_features + delta  # (B, dim)
+            logits = self.logit_scale.exp().clamp(max=100.0) * adapted_image_features @ text_features.t()
+            text_features_flat = text_features
+            text_pre_features = text_features
+            image_features_out = adapted_image_features
+            img_pre_out = img_pre_features  # pre-norm not modified for loss compatibility
+        elif self.use_cocoop:
             # CoCoOp: generate image-conditioned prompts
             text_features = self.get_text_features(image_features=image_features)  # (B, n_cls, dim)
             # Compute logits per image
@@ -429,17 +487,20 @@ class ClipTestTimePromptTuning(nn.Module):
                 logits_list.append(logit_i)
             logits = torch.cat(logits_list, dim=0)  # (B, n_cls)
             # For BATCLIP losses: average text features over batch to get (n_cls, dim)
-            # This allows I2TLoss to work with class indexing
-            text_features_flat = text_features.mean(dim=0)  # (n_cls, dim) - average over batch
-            text_pre_features = text_features.mean(dim=0)  # Same for CoCoOp
+            text_features_flat = text_features.mean(dim=0)  # (n_cls, dim)
+            text_pre_features = text_features.mean(dim=0)
+            image_features_out = image_features
+            img_pre_out = img_pre_features
         else:
             # Standard TPT: static prompts
             text_features = self.get_text_features()
             logits = self.logit_scale.exp() * image_features @ text_features.t()
             text_features_flat = text_features
             text_pre_features = text_features
-        
+            image_features_out = image_features
+            img_pre_out = img_pre_features
+
         if return_features:
-            return logits, image_features, text_features_flat, img_pre_features, text_pre_features
+            return logits, image_features_out, text_features_flat, img_pre_out, text_pre_features
         else:
             return logits

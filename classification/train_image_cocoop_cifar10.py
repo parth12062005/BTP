@@ -1,0 +1,159 @@
+"""
+Train only reverse_meta_net on CIFAR-10. No CoCoOp, no CoOp, no learnable prompts.
+- Text: simple zero-shot embedder only ("a photo of a {class}."), no learnable ctx.
+- Image: image_encoder -> image_feats + reverse_meta_net(text_context) -> adapted image.
+- Only reverse_meta_net is trained. Use to check if reverse_meta_net alone can change accuracy.
+"""
+import argparse
+import logging
+import os
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torchvision import transforms
+from torchvision.datasets import CIFAR10
+from tqdm import tqdm
+
+from open_clip import create_model_and_transforms
+from models.custom_clip import ClipTestTimePromptTuning
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
+logger = logging.getLogger(__name__)
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Train only reverse_meta_net on CIFAR-10 (no CoCoOp; check if it changes accuracy)")
+    p.add_argument("--arch", type=str, default="ViT-B-16", help="CLIP arch (open_clip: ViT-B-16)")
+    p.add_argument("--weights", type=str, default="openai", help="CLIP pretrained weights")
+    p.add_argument("--n_ctx", type=int, default=4, help="Number of context tokens")
+    p.add_argument("--ctx_init", type=str, default="a photo of a", help="Context init phrase (use _ for spaces)")
+    p.add_argument("--epochs", type=int, default=50)
+    p.add_argument("--batch_size", type=int, default=64)
+    p.add_argument("--lr", type=float, default=5e-4)
+    p.add_argument("--save_dir", type=str, default="./checkpoints", help="Dir to save best checkpoint")
+    p.add_argument("--data_dir", type=str, default="./data", help="CIFAR-10 root")
+    p.add_argument("--precision", type=str, default="fp32", choices=["fp32", "fp16"], help="Training precision")
+    return p.parse_args()
+
+
+def get_cifar10_loaders(data_dir, batch_size):
+    train_t = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+    ])
+    test_t = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+    ])
+    train_ds = CIFAR10(root=data_dir, train=True, download=True, transform=train_t)
+    test_ds = CIFAR10(root=data_dir, train=False, download=True, transform=test_t)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=2)
+    return train_loader, test_loader
+
+
+def train_epoch(model, loader, optimizer, criterion, device, epoch, trainable_params):
+    model.train()
+    total_loss, total_correct, total = 0.0, 0, 0
+    pbar = tqdm(loader, desc=f"Epoch {epoch}", leave=False)
+    for images, labels in pbar:
+        images, labels = images.to(device), labels.to(device)
+        optimizer.zero_grad()
+        logits = model(images)
+        logits = logits.clamp(-50.0, 50.0)
+        loss = criterion(logits, labels)
+        if not torch.isfinite(loss).all():
+            logger.warning("Epoch %s: non-finite loss detected, skipping batch", epoch)
+            continue
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+        optimizer.step()
+        total_loss += loss.item()
+        pred = logits.argmax(dim=1)
+        total_correct += (pred == labels).sum().item()
+        total += labels.size(0)
+        pbar.set_postfix(loss=f"{loss.item():.4f}", acc=f"{100.0 * total_correct / total:.2f}%")
+    return total_loss / max(len(loader), 1), 100.0 * total_correct / total
+
+
+@torch.no_grad()
+def evaluate(model, loader, device):
+    model.eval()
+    correct, total = 0, 0
+    for images, labels in tqdm(loader, desc="Evaluating", leave=False):
+        images, labels = images.to(device), labels.to(device)
+        logits = model(images)
+        correct += (logits.argmax(dim=1) == labels).sum().item()
+        total += labels.size(0)
+    return 100.0 * correct / total
+
+
+def main():
+    args = parse_args()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info("Using device: %s", device)
+
+    arch_for_clip = args.arch if "-" in args.arch else args.arch.replace("/", "-")
+    logger.info("Loading CLIP model: %s with weights: %s", arch_for_clip, args.weights)
+    clip_model, _, preprocess = create_model_and_transforms(
+        arch_for_clip, pretrained=args.weights, device=device, precision=args.precision
+    )
+    normalization = preprocess.transforms[-1]
+    preprocess.transforms = preprocess.transforms[:-1]
+
+    logger.info("Creating model: zero-shot text + reverse_meta_net-tuned image only (no CoCoOp/CoOp)...")
+    model = ClipTestTimePromptTuning(
+        clip_model,
+        normalization,
+        arch_for_clip,
+        "cifar10",
+        n_ctx=args.n_ctx,
+        ctx_init=args.ctx_init.replace(" ", "_"),
+        class_token_pos="end",
+        use_cocoop=False,       # no CoCoOp (no image-conditioned prompts)
+        use_reverse_cocoop=True,  # text -> reverse_meta_net -> delta -> add to image
+    )
+    model = model.to(device)
+
+    # Train only reverse_meta_net (prompt_learner / ctx frozen; static prompts)
+    for p in model.parameters():
+        p.requires_grad = False
+    trainable_params = list(model.reverse_meta_net.parameters())
+    for p in trainable_params:
+        p.requires_grad = True
+    n_trainable = sum(p.numel() for p in trainable_params)
+    n_total = sum(p.numel() for p in model.parameters())
+    logger.info("Trainable parameters (reverse_meta_net only): %s / %s (%.3f%%)", n_trainable, n_total, 100.0 * n_trainable / n_total)
+
+    train_loader, test_loader = get_cifar10_loaders(args.data_dir, args.batch_size)
+    logger.info("Loading CIFAR-10 dataset...")
+
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.01)
+    criterion = nn.CrossEntropyLoss()
+
+    os.makedirs(args.save_dir, exist_ok=True)
+    save_path = os.path.join(args.save_dir, "reverse_meta_net_cifar10_best.pth")
+    best_acc = -1.0
+
+    for epoch in range(1, args.epochs + 1):
+        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device, epoch, trainable_params)
+        logger.info("Epoch %s: Train Loss: %.4f, Train Acc: %.2f%%", epoch, train_loss, train_acc)
+        test_acc = evaluate(model, test_loader, device)
+        logger.info("Test Acc: %.2f%%", test_acc)
+        if test_acc > best_acc:
+            best_acc = test_acc
+            state = {
+                "state_dict": {f"reverse_meta_net.{k}": v for k, v in model.reverse_meta_net.state_dict().items()},
+                "epoch": epoch,
+                "arch": args.arch,
+            }
+            torch.save(state, save_path)
+            logger.info("Saved best checkpoint to %s", save_path)
+
+    logger.info("Done. Best test acc: %.2f%%", best_acc)
+
+
+if __name__ == "__main__":
+    main()
