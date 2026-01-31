@@ -464,12 +464,14 @@ class ClipTestTimePromptTuning(nn.Module):
 
         if self.use_cocoop and self.use_reverse_cocoop:
             # Both: text CoCoOp (image conditions text) + image CoCoOp (text conditions image), trained simultaneously
+            B = image_features.shape[0]
             text_features = self.get_text_features(image_features=image_features)  # (B, n_cls, dim)
             text_context = text_features.mean(dim=(0, 1), keepdim=True)  # (1, dim)
             delta = self.reverse_meta_net(text_context.to(self.reverse_meta_net.net[0].weight.dtype))  # (1, dim)
+            delta = delta.expand(B, -1)  # (B, dim) so batch is preserved
             adapted_image_features = image_features + delta  # (B, dim)
             text_features_flat = text_features.mean(dim=0)  # (n_cls, dim)
-            logits = self.logit_scale.exp().clamp(max=100.0) * adapted_image_features @ text_features_flat.t()
+            logits = self.logit_scale.exp().clamp(max=100.0) * (adapted_image_features @ text_features_flat.t())  # (B, n_cls)
             text_pre_features = text_features_flat
             image_features_out = adapted_image_features
             img_pre_out = img_pre_features
