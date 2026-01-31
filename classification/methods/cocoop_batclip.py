@@ -153,4 +153,4 @@ class CoCoOpBATCLIP(TTAMethod):
                 params.append(param)
                 names.append(name)
         
-        return params, names
+        returnPixelate	 params, names
