@@ -67,8 +67,8 @@ class CoCoOpBATCLIP(TTAMethod):
                 # # BATCLIP losses (only if not unimodal image-only mode)
                 # if not self.unimodal_image_only:
                 #     # I2T Loss: image-text alignment
-                i2t_loss_val = self.i2t_loss(logits, img_pre_features, text_features_flat)
-                loss = loss - i2t_loss_val
+                # i2t_loss_val = self.i2t_loss(logits, img_pre_features, text_features_flat)
+                # loss = loss - i2t_loss_val
                     
                 #     # InterMean Loss: push class means apart
                     # inter_mean_loss_val = self.inter_mean_loss(logits, img_pre_features)
@@ -90,8 +90,8 @@ class CoCoOpBATCLIP(TTAMethod):
             # #BATCLIP losses (only if not unimodal image-only mode)
             # if not self.unimodal_image_only:
             #     # I2T Loss: image-text alignment
-            i2t_loss_val = self.i2t_loss(logits, img_pre_features, text_features_flat)
-            loss = loss - i2t_loss_val
+            # i2t_loss_val = self.i2t_loss(logits, img_pre_features, text_features_flat)
+            # loss = loss - i2t_loss_val
                 
             #     # InterMean Loss: push class means apart
             inter_mean_loss_val = self.inter_mean_loss(logits, img_pre_features)
