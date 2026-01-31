@@ -1,8 +1,8 @@
 """
-Train only reverse_meta_net on CIFAR-10. No CoCoOp, no CoOp, no learnable prompts.
-- Text: simple zero-shot embedder only ("a photo of a {class}."), no learnable ctx.
-- Image: image_encoder -> image_feats + reverse_meta_net(text_context) -> adapted image.
-- Only reverse_meta_net is trained. Use to check if reverse_meta_net alone can change accuracy.
+Train text CoCoOp + image CoCoOp simultaneously on CIFAR-10.
+- Text CoCoOp: image conditions text (image -> meta_net -> delta -> add to context -> image-conditioned prompts).
+- Image CoCoOp: text conditions image (text_context -> reverse_meta_net -> delta -> add to image embedding).
+- Both prompt_learner (ctx + meta_net) and reverse_meta_net are trained in the same forward/backward.
 """
 import argparse
 import logging
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Train only reverse_meta_net on CIFAR-10 (no CoCoOp; check if it changes accuracy)")
+    p = argparse.ArgumentParser(description="Train text CoCoOp + image CoCoOp simultaneously on CIFAR-10")
     p.add_argument("--arch", type=str, default="ViT-B-16", help="CLIP arch (open_clip: ViT-B-16)")
     p.add_argument("--weights", type=str, default="openai", help="CLIP pretrained weights")
     p.add_argument("--n_ctx", type=int, default=4, help="Number of context tokens")
@@ -103,7 +103,7 @@ def main():
     normalization = preprocess.transforms[-1]
     preprocess.transforms = preprocess.transforms[:-1]
 
-    logger.info("Creating model: zero-shot text + reverse_meta_net-tuned image only (no CoCoOp/CoOp)...")
+    logger.info("Creating model: text CoCoOp + image CoCoOp (both train simultaneously)...")
     model = ClipTestTimePromptTuning(
         clip_model,
         normalization,
@@ -112,20 +112,25 @@ def main():
         n_ctx=args.n_ctx,
         ctx_init=args.ctx_init.replace(" ", "_"),
         class_token_pos="end",
-        use_cocoop=False,       # no CoCoOp (no image-conditioned prompts)
-        use_reverse_cocoop=True,  # text -> reverse_meta_net -> delta -> add to image
+        use_cocoop=True,        # text CoCoOp: image conditions text (meta_net)
+        use_reverse_cocoop=True,  # image CoCoOp: text conditions image (reverse_meta_net)
     )
     model = model.to(device)
 
-    # Train only reverse_meta_net (prompt_learner / ctx frozen; static prompts)
+    # Train both: prompt_learner (ctx + meta_net) and reverse_meta_net
     for p in model.parameters():
         p.requires_grad = False
-    trainable_params = list(model.reverse_meta_net.parameters())
-    for p in trainable_params:
+    trainable_params = []
+    for name, p in model.prompt_learner.named_parameters():
+        if "token_embedding" not in name:
+            p.requires_grad = True
+            trainable_params.append(p)
+    for p in model.reverse_meta_net.parameters():
         p.requires_grad = True
+        trainable_params.append(p)
     n_trainable = sum(p.numel() for p in trainable_params)
     n_total = sum(p.numel() for p in model.parameters())
-    logger.info("Trainable parameters (reverse_meta_net only): %s / %s (%.3f%%)", n_trainable, n_total, 100.0 * n_trainable / n_total)
+    logger.info("Trainable parameters (prompt_learner + reverse_meta_net): %s / %s (%.3f%%)", n_trainable, n_total, 100.0 * n_trainable / n_total)
 
     train_loader, test_loader = get_cifar10_loaders(args.data_dir, args.batch_size)
     logger.info("Loading CIFAR-10 dataset...")
@@ -134,7 +139,7 @@ def main():
     criterion = nn.CrossEntropyLoss()
 
     os.makedirs(args.save_dir, exist_ok=True)
-    save_path = os.path.join(args.save_dir, "reverse_meta_net_cifar10_best.pth")
+    save_path = os.path.join(args.save_dir, "text_image_cocoop_cifar10_best.pth")
     best_acc = -1.0
 
     for epoch in range(1, args.epochs + 1):
@@ -145,7 +150,10 @@ def main():
         if test_acc > best_acc:
             best_acc = test_acc
             state = {
-                "state_dict": {f"reverse_meta_net.{k}": v for k, v in model.reverse_meta_net.state_dict().items()},
+                "state_dict": {
+                    **{f"prompt_learner.{k}": v for k, v in model.prompt_learner.state_dict().items()},
+                    **{f"reverse_meta_net.{k}": v for k, v in model.reverse_meta_net.state_dict().items()},
+                },
                 "epoch": epoch,
                 "arch": args.arch,
             }

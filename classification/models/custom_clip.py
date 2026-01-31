@@ -462,7 +462,18 @@ class ClipTestTimePromptTuning(nn.Module):
         # Normalize with eps to avoid division by zero / NaN
         image_features = img_pre_features / (img_pre_features.norm(dim=-1, keepdim=True) + 1e-8)
 
-        if self.use_reverse_cocoop:
+        if self.use_cocoop and self.use_reverse_cocoop:
+            # Both: text CoCoOp (image conditions text) + image CoCoOp (text conditions image), trained simultaneously
+            text_features = self.get_text_features(image_features=image_features)  # (B, n_cls, dim)
+            text_context = text_features.mean(dim=(0, 1), keepdim=True)  # (1, dim)
+            delta = self.reverse_meta_net(text_context.to(self.reverse_meta_net.net[0].weight.dtype))  # (1, dim)
+            adapted_image_features = image_features + delta  # (B, dim)
+            text_features_flat = text_features.mean(dim=0)  # (n_cls, dim)
+            logits = self.logit_scale.exp().clamp(max=100.0) * adapted_image_features @ text_features_flat.t()
+            text_pre_features = text_features_flat
+            image_features_out = adapted_image_features
+            img_pre_out = img_pre_features
+        elif self.use_reverse_cocoop:
             # Simple text embedder (zero-shot template) + reverse_meta_net-tuned image; no CoCoOp
             text_features = self.get_text_features_zeroshot()  # (n_cls, dim), "a photo of a {class}."
             text_context = text_features.mean(dim=0, keepdim=True)  # (1, dim)
