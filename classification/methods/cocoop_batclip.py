@@ -56,7 +56,7 @@ class CoCoOpBATCLIP(TTAMethod):
         if self.scaler:
             with torch.cuda.amp.autocast():
                 # Main entropy loss
-                loss = self.entropy_loss(logits).mean(0)
+                # loss = self.entropy_loss(logits).mean(0)
                 
                 # # BATCLIP losses (only if not unimodal image-only mode)
                 # if not self.unimodal_image_only:
@@ -75,7 +75,7 @@ class CoCoOpBATCLIP(TTAMethod):
                     loss = loss + self.lambda_ent * avg_ent_val
         else:
             # Main entropy loss
-            loss = self.entropy_loss(logits).mean(0)
+            # loss = self.entropy_loss(logits).mean(0)
             
             # BATCLIP losses (only if not unimodal image-only mode)
             # if not self.unimodal_image_only:
