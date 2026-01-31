@@ -432,8 +432,8 @@ def get_model(cfg, num_classes: int, device: Union[str, torch.device]):
                                                   class_token_pos=cfg.TPT.CLASS_TOKEN_POS,
                                                   use_cocoop=True)
             if cfg.MODEL.CKPT_PATH:
-                # Load ctx and meta_net from CoOp/CoCoOp checkpoint (ours or external e.g. multimodal-prompt-learning).
-                # Architecture now matches external: one shared bias per image (meta_net.linear1, linear2).
+                # Load ctx and meta_net from CoOp/CoCoOp checkpoint (ours or external).
+                # Architecture: 3-layer meta_net (linear1, norm1, linear2, norm2, linear3).
                 checkpoint = torch.load(cfg.MODEL.CKPT_PATH, map_location='cpu')
                 if 'state_dict' in checkpoint:
                     state_dict = checkpoint['state_dict']
@@ -451,7 +451,7 @@ def get_model(cfg, num_classes: int, device: Union[str, torch.device]):
                     with torch.no_grad():
                         base_model.prompt_learner.ctx.copy_(load_ctx)
                         base_model.prompt_learner.ctx_init_state = load_ctx.clone()
-                # Load meta_net if present and shapes match (external CoCoOp uses meta_net.linear1, linear2)
+                # Load meta_net if present and shapes match (meta_net: linear1, norm1, linear2, norm2, linear3)
                 pl_sd = base_model.prompt_learner.state_dict()
                 to_load = {k: v for k, v in state_dict.items()
                            if k.startswith("meta_net.") and k in pl_sd and pl_sd[k].shape == v.shape}

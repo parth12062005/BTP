@@ -1,7 +1,7 @@
 """
 GoodBATCoop: Two-stage test-time adaptation for CoCoOp-CLIP.
 1. Adapt image and text encoder with BATCLIP losses (entropy, I2T, InterMean).
-2. Adapt meta_net last layer (linear2) with TPT loss (avg entropy on confident samples).
+2. Adapt meta_net last layer (linear3) with TPT loss (avg entropy on confident samples).
 """
 
 import torch
@@ -132,7 +132,7 @@ class GoodBATCoop(TTAMethod):
                 loss_bat.backward()
                 self.optimizer_encoder.step()
 
-        # ----- Stage 2: Adapt meta_net.linear2 with TPT loss -----
+        # ----- Stage 2: Adapt meta_net.linear3 with TPT loss -----
         if self.optimizer_meta is not None:
             outputs = forward()
             logits = outputs[0]
@@ -166,9 +166,9 @@ class GoodBATCoop(TTAMethod):
                     m.running_mean = None
                     m.running_var = None
 
-        # Prompt learner: only meta_net.linear2 (last layer)
+        # Prompt learner: only meta_net.linear3 (last layer)
         for name, param in self.model.named_parameters():
-            if "prompt_learner" in name and "meta_net.linear2" in name:
+            if "prompt_learner" in name and "meta_net.linear3" in name:
                 param.requires_grad_(True)
 
     def collect_params(self):
@@ -187,7 +187,7 @@ class GoodBATCoop(TTAMethod):
                         encoder_names.append(f"{nm}.{np}")
 
         for name, param in self.model.named_parameters():
-            if "prompt_learner" in name and "meta_net.linear2" in name and param.requires_grad:
+            if "prompt_learner" in name and "meta_net.linear3" in name and param.requires_grad:
                 meta_params.append(param)
                 meta_names.append(name)
 

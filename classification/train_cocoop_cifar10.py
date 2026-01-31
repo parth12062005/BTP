@@ -1,12 +1,11 @@
 """
 Standalone script to train CoCoOp on CIFAR-10 (supervised).
 Trains only prompt learner (ctx + meta_net). Saves checkpoint compatible with
-CoCoOp-BATCLIP TTA loading in get_model() (state_dict: ctx, meta_net with linear1/norm1/linear2/norm2/linear3).
+CoCoOp-BATCLIP TTA loading in get_model() (state_dict: ctx, meta_net with linear1, norm1, linear2, norm2, linear3).
 """
 import argparse
 import logging
 import os
-from collections import OrderedDict
 
 import torch
 import torch.nn as nn
@@ -117,21 +116,7 @@ def main():
         use_cocoop=True,
     )
     model = model.to(device)
-
-    # Replace default 2-layer meta_net with 3-layer meta_net + normalization (training script only)
-    ctx_dim = model.prompt_learner.ctx_dim
-    vis_dim = ctx_dim
-    h1, h2 = vis_dim // 4, vis_dim // 16
-    model.prompt_learner.meta_net = nn.Sequential(OrderedDict([
-        ("linear1", nn.Linear(vis_dim, h1)),
-        ("norm1", nn.LayerNorm(h1)),
-        ("relu1", nn.ReLU(inplace=True)),
-        ("linear2", nn.Linear(h1, h2)),
-        ("norm2", nn.LayerNorm(h2)),
-        ("relu2", nn.ReLU(inplace=True)),
-        ("linear3", nn.Linear(h2, ctx_dim)),
-    ])).to(device)
-    logger.info("Replaced meta_net with 3-layer MLP + LayerNorm (vis_dim=%s -> %s -> %s -> ctx_dim=%s)", vis_dim, h1, h2, ctx_dim)
+    # CoCoOp uses 3-layer meta_net + LayerNorm (defined in custom_clip.CoCoOpPromptLearner)
 
     # Train only prompt learner: ctx + meta_net (exclude token_embedding, which is registered as submodule)
     for p in model.parameters():

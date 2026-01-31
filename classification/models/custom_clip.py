@@ -237,20 +237,23 @@ class PromptLearner(nn.Module):
 class CoCoOpPromptLearner(PromptLearner):
     """
     Image-conditioned prompt learner for CoCoOp.
-    Matches external CoCoOp (e.g. multimodal-prompt-learning): one shared bias π per image,
-    v_m(x) = v_m + π. Meta-net: Linear(vis_dim, vis_dim//16) -> ReLU -> Linear(vis_dim//16, ctx_dim).
+    One shared bias π per image: v_m(x) = v_m + π.
+    Meta-net: 3-layer MLP with LayerNorm: Linear -> LN -> ReLU -> Linear -> LN -> ReLU -> Linear.
     """
     def __init__(self, clip_model, arch_name, class_names, n_ctx=16, ctx_init=None, class_token_pos='end', learned_cls=False):
         super().__init__(clip_model, arch_name, class_names, n_ctx, ctx_init, class_token_pos, learned_cls)
         
-        # Meta network: same architecture as external CoCoOp (one output vector per image, added to all context tokens)
-        # Input: image feature dim (vis_dim); output: ctx_dim. Keys linear1/linear2 for checkpoint compatibility.
         ctx_dim = self.ctx_dim
-        vis_dim = ctx_dim  # open_clip ViT: image encoder output dim equals transformer width
+        vis_dim = ctx_dim
+        h1, h2 = vis_dim // 4, vis_dim // 16
         self.meta_net = nn.Sequential(OrderedDict([
-            ("linear1", nn.Linear(vis_dim, vis_dim // 16)),
-            ("relu", nn.ReLU(inplace=True)),
-            ("linear2", nn.Linear(vis_dim // 16, ctx_dim))
+            ("linear1", nn.Linear(vis_dim, h1)),
+            ("norm1", nn.LayerNorm(h1)),
+            ("relu1", nn.ReLU(inplace=True)),
+            ("linear2", nn.Linear(h1, h2)),
+            ("norm2", nn.LayerNorm(h2)),
+            ("relu2", nn.ReLU(inplace=True)),
+            ("linear3", nn.Linear(h2, ctx_dim)),
         ]))
     
     def forward(self, image_features=None, init=None):
