@@ -57,7 +57,10 @@ class TTAMethod(nn.Module):
         # note: if the self.model is never reset, like for continual adaptation,
         # then skipping the state copy would save memory
         self.models = [self.model]
-        self.model_states, self.optimizer_state = self.copy_model_and_optimizer()
+        if self.optimizer is not None:
+            self.model_states, self.optimizer_state = self.copy_model_and_optimizer()
+        else:
+            self.model_states, self.optimizer_state = None, None
 
         # setup for mixed-precision or single precision
         self.mixed_precision = cfg.MIXED_PRECISION
@@ -188,6 +191,8 @@ class TTAMethod(nn.Module):
 
     def reset(self):
         """Reset the model and optimizer state to the initial source state"""
+        if self.model_states is None and self.optimizer_state is None:
+            return  # nothing to restore (no trainable params)
         if self.model_states is None or self.optimizer_state is None:
             raise Exception("cannot reset without saved model/optimizer state")
         self.load_model_and_optimizer()
@@ -200,8 +205,9 @@ class TTAMethod(nn.Module):
 
     def load_model_and_optimizer(self):
         """Restore the model and optimizer states from copies."""
-        for model, model_state in zip(self.models, self.model_states):
-            model.load_state_dict(model_state, strict=True)
+        if self.model_states is not None:
+            for model, model_state in zip(self.models, self.model_states):
+                model.load_state_dict(model_state, strict=True)
         if self.optimizer is not None and self.optimizer_state is not None:
             self.optimizer.load_state_dict(self.optimizer_state)
 
