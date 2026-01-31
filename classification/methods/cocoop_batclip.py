@@ -118,9 +118,9 @@ class CoCoOpBATCLIP(TTAMethod):
         self.model.requires_grad_(False)
 
         # Enable gradients only for meta_net LayerNorms (norm1, norm2)
-        for name, param in self.model.named_parameters():
-            if "prompt_learner" in name and ("meta_net.norm1" in name or "meta_net.norm2" in name):
-                param.requires_grad_(True)
+        # for name, param in self.model.named_parameters():
+        #     if "prompt_learner" in name and ("meta_net.norm1" in name or "meta_net.norm2" in name):
+        #         param.requires_grad_(True)
 
     def collect_params(self):
         """
