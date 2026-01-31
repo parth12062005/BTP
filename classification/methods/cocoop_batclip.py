@@ -93,16 +93,17 @@ class CoCoOpBATCLIP(TTAMethod):
                 avg_ent_val = avg_entropy(logits_conf)
                 loss = loss + self.lambda_ent * avg_ent_val
         
-        # Backward and optimizer step
-        self.optimizer.zero_grad()
-        if self.scaler:
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-        else:
-            loss.backward()
-            self.optimizer.step()
-        
+        # Backward and optimizer step (skip when no trainable params)
+        if self.optimizer is not None:
+            self.optimizer.zero_grad()
+            if self.scaler:
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                self.optimizer.step()
+
         return logits.detach()
     
     def configure_model(self):

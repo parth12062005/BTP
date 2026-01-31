@@ -195,14 +195,15 @@ class TTAMethod(nn.Module):
     def copy_model_and_optimizer(self):
         """Copy the model and optimizer states for resetting after adaptation."""
         model_states = [deepcopy(model.state_dict()) for model in self.models]
-        optimizer_state = deepcopy(self.optimizer.state_dict())
+        optimizer_state = deepcopy(self.optimizer.state_dict()) if self.optimizer is not None else None
         return model_states, optimizer_state
 
     def load_model_and_optimizer(self):
         """Restore the model and optimizer states from copies."""
         for model, model_state in zip(self.models, self.model_states):
             model.load_state_dict(model_state, strict=True)
-        self.optimizer.load_state_dict(self.optimizer_state)
+        if self.optimizer is not None and self.optimizer_state is not None:
+            self.optimizer.load_state_dict(self.optimizer_state)
 
     @staticmethod
     def copy_model(model):
