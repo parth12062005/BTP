@@ -28,7 +28,9 @@ MODEL:
   WEIGHTS: openai
   USE_CLIP: True
   EPISODIC: False
-  # CKPT_PATH: ""  # Optional: path to CoCoOp checkpoint (e.g. cocoop_cifar10_best.pth)
+  # CKPT_PATH: ""  # Optional: path to text CoCoOp checkpoint (e.g. text_cocoop_cifar10_best.pth)
+  # USE_REVERSE_COCOOP: False  # If True, use both text + image CoCoOp (forward uses both meta-nets)
+  # IMAGE_COCOOP_CKPT_PATH: ""  # Optional: path to image CoCoOp checkpoint (e.g. image_cocoop_cifar10_best.pth); enables use_reverse_cocoop if set
   # UNIMODAL_IMAGE_ONLY: False  # If True, disable I2T and InterMean losses
 OPTIM:
   LR: 1e-3

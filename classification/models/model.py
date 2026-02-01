@@ -425,23 +425,22 @@ def get_model(cfg, num_classes: int, device: Union[str, torch.device]):
                     base_model.prompt_learner.ctx_init_state = load_ctx.clone()
                 logger.info("Successfully restored pre-trained soft prompt (CoOp)")
         elif cfg.MODEL.ADAPTATION in ["CoCoOpBATCLIP", "cocoopbatclip", "cocoop_batclip"]:
-            # CoCoOp-BATCLIP: use CoCoOp prompt learner
+            # CoCoOp-BATCLIP: use CoCoOp prompt learner; optionally add image CoCoOp (reverse_meta_net)
+            use_reverse_cocoop = getattr(cfg.MODEL, "USE_REVERSE_COCOOP", False) or getattr(cfg.MODEL, "IMAGE_COCOOP_CKPT_PATH", None)
             base_model = ClipTestTimePromptTuning(base_model, normalization,
                                                   cfg.MODEL.ARCH, cfg.CORRUPTION.DATASET,
                                                   n_ctx=cfg.TPT.N_CTX, ctx_init=cfg.TPT.CTX_INIT,
                                                   class_token_pos=cfg.TPT.CLASS_TOKEN_POS,
-                                                  use_cocoop=True)
+                                                  use_cocoop=True,
+                                                  use_reverse_cocoop=bool(use_reverse_cocoop))
             if cfg.MODEL.CKPT_PATH:
-                # Load ctx and meta_net from CoOp/CoCoOp checkpoint (ours or external).
-                # Architecture: 3-layer meta_net (linear1, norm1, linear2, norm2, linear3).
+                # Load ctx and meta_net (text CoCoOp) from checkpoint.
                 checkpoint = torch.load(cfg.MODEL.CKPT_PATH, map_location='cpu')
                 if 'state_dict' in checkpoint:
                     state_dict = checkpoint['state_dict']
                 else:
                     state_dict = checkpoint
-                # Strip keys we don't load (class-name dependent)
                 state_dict = {k: v for k, v in state_dict.items() if k not in ("token_prefix", "token_suffix")}
-                # Resolve ctx key (top-level or nested)
                 ctx_key = "ctx" if "ctx" in state_dict else "prompt_learner.ctx" if "prompt_learner.ctx" in state_dict else None
                 if ctx_key:
                     pretrained_ctx = state_dict[ctx_key]
@@ -451,14 +450,23 @@ def get_model(cfg, num_classes: int, device: Union[str, torch.device]):
                     with torch.no_grad():
                         base_model.prompt_learner.ctx.copy_(load_ctx)
                         base_model.prompt_learner.ctx_init_state = load_ctx.clone()
-                # Load meta_net if present and shapes match (meta_net: linear1, norm1, linear2, norm2, linear3)
                 pl_sd = base_model.prompt_learner.state_dict()
                 to_load = {k: v for k, v in state_dict.items()
                            if k.startswith("meta_net.") and k in pl_sd and pl_sd[k].shape == v.shape}
                 if to_load:
                     base_model.prompt_learner.load_state_dict(to_load, strict=False)
                 if ctx_key or to_load:
-                    logger.info("Successfully restored pre-trained soft prompt (CoOp) for CoCoOp-BATCLIP")
+                    logger.info("Successfully restored pre-trained soft prompt (text CoCoOp) for CoCoOp-BATCLIP")
+            # Load image CoCoOp (reverse_meta_net) from separate checkpoint if provided
+            image_ckpt = getattr(cfg.MODEL, "IMAGE_COCOOP_CKPT_PATH", None)
+            if image_ckpt and getattr(base_model, "reverse_meta_net", None) is not None:
+                ckpt = torch.load(image_ckpt, map_location="cpu")
+                sd = ckpt.get("state_dict", ckpt)
+                rmn_sd = base_model.reverse_meta_net.state_dict()
+                to_load = {k: v for k, v in sd.items() if k in rmn_sd and rmn_sd[k].shape == v.shape}
+                if to_load:
+                    base_model.reverse_meta_net.load_state_dict(to_load, strict=False)
+                    logger.info("Successfully restored image CoCoOp (reverse_meta_net) from %s", image_ckpt)
         else:
             base_model = ZeroShotCLIP(cfg, base_model, device, normalize=normalization)
 
