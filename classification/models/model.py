@@ -15,7 +15,7 @@ from robustbench.utils import load_model
 from typing import Union
 from copy import deepcopy
 from models import resnet26
-from models.custom_clip import ClipTestTimePromptTuning
+from models.custom_clip import ClipTestTimePromptTuning, ClipBMPET
 from packaging import version
 from datasets.cls_names import get_class_names
 from datasets.imagenet_subsets import IMAGENET_A_MASK, IMAGENET_R_MASK, IMAGENET_V2_MASK, IMAGENET_D109_MASK
@@ -467,6 +467,20 @@ def get_model(cfg, num_classes: int, device: Union[str, torch.device]):
                 if to_load:
                     base_model.reverse_meta_net.load_state_dict(to_load, strict=False)
                     logger.info("Successfully restored image CoCoOp (reverse_meta_net) from %s", image_ckpt)
+        elif cfg.MODEL.ADAPTATION in ["BMPETCLIP", "bmpetclip", "bmpet_clip"]:
+            base_model = ClipBMPET(base_model, normalization,
+                                   cfg.MODEL.ARCH, cfg.CORRUPTION.DATASET,
+                                   n_ctx=cfg.TPT.N_CTX, ctx_init=cfg.TPT.CTX_INIT,
+                                   class_token_pos=cfg.TPT.CLASS_TOKEN_POS)
+            if cfg.MODEL.CKPT_PATH:
+                ckpt = torch.load(cfg.MODEL.CKPT_PATH, map_location="cpu")
+                sd = ckpt.get("state_dict", ckpt)
+                # Load prompt_learner (ctx, meta_net) and fusion + heads
+                model_sd = base_model.state_dict()
+                to_load = {k: v for k, v in sd.items() if k in model_sd and model_sd[k].shape == v.shape}
+                if to_load:
+                    base_model.load_state_dict(to_load, strict=False)
+                    logger.info("Successfully restored BMPET from %s (%d keys)", cfg.MODEL.CKPT_PATH, len(to_load))
         else:
             base_model = ZeroShotCLIP(cfg, base_model, device, normalize=normalization)
 

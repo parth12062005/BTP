@@ -347,6 +347,43 @@ class CoCoOpPromptLearner(PromptLearner):
         return prompts
 
 
+class FusionMLP(nn.Module):
+    """
+    Fusion of image and text encodings: (img_enc, text_enc) -> 1024 -> 512 -> 128.
+    BN between every two layers; BNs are adapted during TTA.
+    """
+    def __init__(self, input_dim=1024, hidden_dim=512, output_dim=128):
+        super().__init__()
+        self.net = nn.Sequential(OrderedDict([
+            ("linear1", nn.Linear(input_dim, hidden_dim)),
+            ("bn1", nn.BatchNorm1d(hidden_dim)),
+            ("relu1", nn.ReLU(inplace=True)),
+            ("linear2", nn.Linear(hidden_dim, output_dim)),
+            ("bn2", nn.BatchNorm1d(output_dim)),
+        ]))
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class BiasHead(nn.Module):
+    """
+    Head from fusion output 128 -> 64 -> bias (embed_dim). BN between layers; adapted at TTA.
+    Used for text-bias (CoCoOp-type) and image-bias (reverse CoCoOp-type).
+    """
+    def __init__(self, input_dim=128, hidden_dim=64, output_dim=512):
+        super().__init__()
+        self.net = nn.Sequential(OrderedDict([
+            ("linear1", nn.Linear(input_dim, hidden_dim)),
+            ("bn1", nn.BatchNorm1d(hidden_dim)),
+            ("relu1", nn.ReLU(inplace=True)),
+            ("linear2", nn.Linear(hidden_dim, output_dim)),
+        ]))
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class ReverseMetaNet(nn.Module):
     """
     Opposite of CoCoOp meta_net: takes TEXT embedding and outputs a delta for IMAGE embedding.
@@ -523,3 +560,89 @@ class ClipTestTimePromptTuning(nn.Module):
             return logits, image_features_out, text_features_flat, img_pre_out, text_pre_features
         else:
             return logits
+
+
+class ClipBMPET(nn.Module):
+    """
+    BMPETCLIP: BiModel Prompt and Embedding space TTA.
+    - CoOp-style learned prompt + CoCoOp meta-net for image-conditioned prompt bias.
+    - Fusion: (img_enc, text_enc) -> 1024 -> 512 -> 128 (BN between layers).
+    - Two heads from 128: (1) 128->64->bias for text (CoCoOp-type), (2) 128->64->bias for image (reverse CoCoOp-type).
+    - Final pass: adapted_image @ adapted_text for logits.
+    BNs in fusion and heads (and CLIP) are adapted during TTA.
+    """
+    def __init__(self, clip_model, normalization, arch_name, dataset_name, n_ctx=16,
+                 ctx_init=None, class_token_pos='end', learned_cls=False):
+        super().__init__()
+        self.base = ClipTestTimePromptTuning(
+            clip_model, normalization, arch_name, dataset_name,
+            n_ctx=n_ctx, ctx_init=ctx_init, class_token_pos=class_token_pos, learned_cls=learned_cls,
+            use_cocoop=True, use_reverse_cocoop=False,
+        )
+        embed_dim = clip_model.ln_final.weight.shape[0]  # 512 for ViT-B
+        self.fusion = FusionMLP(input_dim=embed_dim * 2, hidden_dim=512, output_dim=128)
+        self.head_text_bias = BiasHead(input_dim=128, hidden_dim=64, output_dim=embed_dim)
+        self.head_image_bias = BiasHead(input_dim=128, hidden_dim=64, output_dim=embed_dim)
+
+    @property
+    def dtype(self):
+        return self.base.dtype
+
+    @property
+    def prompt_learner(self):
+        return self.base.prompt_learner
+
+    @property
+    def normalize(self):
+        return self.base.normalize
+
+    def reset(self):
+        self.base.reset()
+
+    def reset_class_names(self, class_names):
+        self.base.reset_class_names(class_names)
+
+    def get_text_features(self, image_features=None):
+        return self.base.get_text_features(image_features=image_features)
+
+    def forward(self, image, return_features=False):
+        image = self.base.normalize(image.type(self.dtype))
+        img_pre_features = self.base.image_encoder(image)
+        image_features = img_pre_features / (img_pre_features.norm(dim=-1, keepdim=True) + 1e-8)
+        B = image_features.shape[0]
+
+        # CoCoOp text features (image-conditioned prompts)
+        text_features = self.base.get_text_features(image_features=image_features)  # (B, n_cls, dim)
+        text_mean = text_features.mean(dim=1)  # (B, dim)
+
+        # Fusion: concat(img, text_mean) -> 1024 -> 512 -> 128
+        joint = torch.cat([image_features, text_mean], dim=-1)  # (B, 1024)
+        z = self.fusion(joint)  # (B, 128)
+
+        # Biases for text and image (CoCoOp-type and reverse CoCoOp-type)
+        bias_text = self.head_text_bias(z)   # (B, dim)
+        bias_image = self.head_image_bias(z)  # (B, dim)
+
+        # Aligned prompts: add biases
+        adapted_text = text_features + bias_text.unsqueeze(1)  # (B, n_cls, dim)
+        adapted_image = image_features + bias_image  # (B, dim)
+
+        # Per-sample logits (aligned pass)
+        logits_list = []
+        for i in range(B):
+            ad_img = adapted_image[i:i + 1].to(self.dtype)
+            ad_txt = adapted_text[i].to(self.dtype)
+            ad_txt = ad_txt / (ad_txt.norm(dim=-1, keepdim=True) + 1e-8)
+            logit_i = self.base.logit_scale.exp().clamp(max=100.0) * (ad_img @ ad_txt.t())
+            logits_list.append(logit_i)
+        logits = torch.cat(logits_list, dim=0)  # (B, n_cls)
+
+        # For BATCLIP losses
+        text_features_flat = adapted_text.mean(dim=0)  # (n_cls, dim)
+        image_features_out = adapted_image
+        img_pre_out = img_pre_features
+        text_pre_features = text_features_flat
+
+        if return_features:
+            return logits, image_features_out, text_features_flat, img_pre_out, text_pre_features
+        return logits
