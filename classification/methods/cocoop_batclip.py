@@ -125,15 +125,15 @@ class CoCoOpBATCLIP(TTAMethod):
         self.model.eval()
         self.model.requires_grad_(False)
 
-        # Enable gradients for meta_net LayerNorms (text CoCoOp)
-        for name, param in self.model.named_parameters():
-            if "prompt_learner" in name and ("meta_net.norm1" in name or "meta_net.norm2" in name):
-                param.requires_grad_(True)
-        # Enable gradients for reverse_meta_net LayerNorms (image CoCoOp) when model has both
-        if getattr(self.model, "reverse_meta_net", None) is not None:
-            for name, param in self.model.named_parameters():
-                if "reverse_meta_net" in name and (".norm1" in name or ".norm2" in name):
-                    param.requires_grad_(True)
+        # # Enable gradients for meta_net LayerNorms (text CoCoOp)
+        # for name, param in self.model.named_parameters():
+        #     if "prompt_learner" in name and ("meta_net.norm1" in name or "meta_net.norm2" in name):
+        #         param.requires_grad_(True)
+        # # Enable gradients for reverse_meta_net LayerNorms (image CoCoOp) when model has both
+        # if getattr(self.model, "reverse_meta_net", None) is not None:
+        #     for name, param in self.model.named_parameters():
+        #         if "reverse_meta_net" in name and (".norm1" in name or ".norm2" in name):
+        #             param.requires_grad_(True)
 
     def collect_params(self):
         """
