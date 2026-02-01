@@ -83,6 +83,10 @@ _C.MODEL.USE_CLIP = False
 # Path to a specific checkpoint
 _C.MODEL.CKPT_PATH = ""
 
+# CoCoOp: use image-conditioned text + text-conditioned image (reverse_meta_net)
+_C.MODEL.USE_REVERSE_COCOOP = False
+_C.MODEL.IMAGE_COCOOP_CKPT_PATH = ""
+
 # Inspect the cfgs directory to see all possibilities
 _C.MODEL.ADAPTATION = 'source'
 
