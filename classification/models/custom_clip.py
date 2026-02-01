@@ -468,10 +468,13 @@ class ClipTestTimePromptTuning(nn.Module):
             text_features = self.get_text_features(image_features=image_features)  # (B, n_cls, dim)
             text_context = text_features.mean(dim=(0, 1), keepdim=True).squeeze(0)  # (1, dim)
             delta = self.reverse_meta_net(text_context.to(self.reverse_meta_net.net[0].weight.dtype))  # (1, dim)
-            delta = delta.expand(B, -1)  # (B, dim) so batch is preserved
+            delta = delta.expand(B, -1).to(image_features.dtype)  # (B, dim), match image dtype
             adapted_image_features = image_features + delta  # (B, dim)
             text_features_flat = text_features.mean(dim=0)  # (n_cls, dim)
-            logits = self.logit_scale.exp().clamp(max=100.0) * (adapted_image_features @ text_features_flat.t())  # (B, n_cls)
+            # Ensure same dtype for matmul (fp16 vs fp32 mismatch)
+            ad = adapted_image_features.to(self.dtype)
+            tf = text_features_flat.to(self.dtype)
+            logits = self.logit_scale.exp().clamp(max=100.0) * (ad @ tf.t())  # (B, n_cls)
             text_pre_features = text_features_flat
             image_features_out = adapted_image_features
             img_pre_out = img_pre_features
@@ -480,8 +483,11 @@ class ClipTestTimePromptTuning(nn.Module):
             text_features = self.get_text_features_zeroshot()  # (n_cls, dim), "a photo of a {class}."
             text_context = text_features.mean(dim=0, keepdim=True)  # (1, dim)
             delta = self.reverse_meta_net(text_context.to(self.reverse_meta_net.net[0].weight.dtype))  # (1, dim)
+            delta = delta.to(image_features.dtype)
             adapted_image_features = image_features + delta  # (B, dim)
-            logits = self.logit_scale.exp().clamp(max=100.0) * adapted_image_features @ text_features.t()
+            ad = adapted_image_features.to(self.dtype)
+            tf = text_features.to(self.dtype)
+            logits = self.logit_scale.exp().clamp(max=100.0) * (ad @ tf.t())
             text_features_flat = text_features
             text_pre_features = text_features
             image_features_out = adapted_image_features
