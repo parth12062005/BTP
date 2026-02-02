@@ -98,7 +98,7 @@ class BMPETCLIP(TTAMethod):
                 continue
             # in_bmpet = "fusion." in name or "head_text_bias." in name or "head_image_bias." in name
             in_clip = "base.image_encoder." in name or "base.text_encoder." in name
-            if in_bmpet or in_clip:
+            if in_clip:
                 m.requires_grad_(True)
                 adapted_layer_names.append(name)
                 if isinstance(m, nn.BatchNorm2d):
