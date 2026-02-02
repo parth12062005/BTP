@@ -471,6 +471,8 @@ class VisualEncoderWithContext(nn.Module):
     """
     Wrapper around CLIP ViT that inserts visual context tokens before CLS.
     Sequence: [C1] [C2] [C3] [CLS] [P1] [P2] ... [PN]
+    Applies visual.proj at the end so output dim matches text (embed_dim);
+    both image and text encoders use projection heads (visual.proj, text_projection).
     """
     def __init__(self, visual_encoder, visual_ctx_learner):
         super().__init__()
@@ -533,8 +535,10 @@ class VisualEncoderWithContext(nn.Module):
         
         # Extract CLS token (at position n_ctx_vis, after visual ctx tokens)
         cls_idx = self.n_ctx_vis
-        x = visual.ln_post(x[:, cls_idx, :])  # (B, embed_dim)
-        
+        x = visual.ln_post(x[:, cls_idx, :])  # (B, width) e.g. 768 for ViT-L
+        # Apply visual projection head (same as original ViT forward) -> (B, output_dim) e.g. 512
+        if getattr(visual, "proj", None) is not None:
+            x = x @ visual.proj  # (B, output_dim) to match text_projection output
         return x
 
 
