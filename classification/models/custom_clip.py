@@ -734,9 +734,11 @@ class ClipBMPET(nn.Module):
             n_ctx=n_ctx, ctx_init=ctx_init, class_token_pos=class_token_pos, learned_cls=learned_cls,
             use_cocoop=True, use_reverse_cocoop=False,
         )
-        # Text (projection) dim and visual encoder output dim can differ (e.g. ViT-B: visual 768, text 512)
-        text_dim = clip_model.ln_final.weight.shape[0]  # 512 for ViT-B (projection dim)
-        vis_dim = getattr(clip_model.visual, 'output_dim', None) or clip_model.visual.ln_post.weight.shape[0]
+        # Text/context dim (from transformer output)
+        text_dim = clip_model.ln_final.weight.shape[0]  # 512 for ViT-B, etc.
+        # Visual encoder output dim (may differ from text_dim, e.g. ViT-L visual 768 + text 512)
+        vis_emb = clip_model.visual.class_embedding
+        vis_dim = vis_emb.shape[-1] if vis_emb.dim() >= 1 else vis_emb.shape[0]
         
         # Visual context prompt learner (CoCoOp-style for image side)
         self.visual_ctx_learner = VisualContextPromptLearner(clip_model, n_ctx_vis=n_ctx_vis, ctx_init=None)
@@ -744,14 +746,10 @@ class ClipBMPET(nn.Module):
         # Wrap image encoder to insert visual context tokens
         self.image_encoder = VisualEncoderWithContext(clip_model.visual, self.visual_ctx_learner)
         
-        # Fusion: concat(image_features, text_mean) -> input_dim = vis_dim + text_dim (e.g. 768+512=1280)
+        # Fusion: concat(image_features, text_mean) -> input_dim = vis_dim + text_dim
         fusion_input_dim = vis_dim + text_dim
         self.fusion = FusionMLP(input_dim=fusion_input_dim, hidden_dim=512, output_dim=128)
         self.head_text_bias = BiasHead(input_dim=128, hidden_dim=64, output_dim=text_dim)
-        # When vis_dim != text_dim, project image to text_dim for logits (inner product)
-        self.vis_dim = vis_dim
-        self.text_dim = text_dim
-        self.vis_proj = nn.Linear(vis_dim, text_dim) if vis_dim != text_dim else None
 
     @property
     def dtype(self):
@@ -790,37 +788,36 @@ class ClipBMPET(nn.Module):
         text_mean = text_features.mean(dim=1)  # (B, dim)
         
         # Now run image encoder WITH visual context tokens (conditioned on text_mean)
-        img_pre_features = self.image_encoder(image, text_features=text_mean)  # (B, vis_dim)
+        img_pre_features = self.image_encoder(image, text_features=text_mean)  # (B, dim) - with visual ctx tokens
         image_features = img_pre_features / (img_pre_features.norm(dim=-1, keepdim=True) + 1e-8)
 
         # ----- Fusion + text bias head: embeddings -> text bias -----
         # Fusion/heads are float32; CLIP may be Half -> cast for linear layers then back
-        joint = torch.cat([image_features, text_mean], dim=-1)  # (B, vis_dim + text_dim)
+        joint = torch.cat([image_features, text_mean], dim=-1)  # (B, 1024), may be Half
         joint_f = joint.float()
         z = self.fusion(joint_f)  # (B, 128)
-        bias_text = self.head_text_bias(z)   # (B, text_dim)
+        bias_text = self.head_text_bias(z)   # (B, dim)
         bias_text = bias_text.to(image_features.dtype)
 
         # ----- Edit: add bias to text embeddings -----
-        adapted_text = text_features + bias_text.unsqueeze(1)  # (B, n_cls, text_dim)
+        adapted_text = text_features + bias_text.unsqueeze(1)  # (B, n_cls, dim)
+        # Image side already has visual context tokens (no bias addition needed)
 
         # ----- Second pass (final): logits from adapted embeddings only -----
-        # Project image to text_dim when vis_dim != text_dim so inner product is valid
-        image_for_logits = self.vis_proj(image_features) if self.vis_proj is not None else image_features  # (B, text_dim)
-        image_for_logits = image_for_logits / (image_for_logits.norm(dim=-1, keepdim=True) + 1e-8)
+        # Image features already include visual ctx tokens; text has bias
         logits_list = []
         for i in range(B):
-            ad_img = image_for_logits[i:i + 1].to(self.dtype)
+            ad_img = image_features[i:i + 1].to(self.dtype)
             ad_txt = adapted_text[i].to(self.dtype)
             ad_txt = ad_txt / (ad_txt.norm(dim=-1, keepdim=True) + 1e-8)
             logit_i = self.base.logit_scale.exp().clamp(max=100.0) * (ad_img @ ad_txt.t())
             logits_list.append(logit_i)
         logits = torch.cat(logits_list, dim=0)  # (B, n_cls)  <- only logits; loss must use this
 
-        # For BATCLIP losses (TTA uses logits + these; img_pre_out must match text dim for I2T/InterMean)
-        text_features_flat = adapted_text.mean(dim=0)  # (n_cls, text_dim) - adapted
-        image_features_out = image_for_logits  # (B, text_dim)
-        img_pre_out = self.vis_proj(img_pre_features) if self.vis_proj is not None else img_pre_features  # (B, text_dim)
+        # For BATCLIP losses (TTA uses logits + these; loss is computed after this forward)
+        text_features_flat = adapted_text.mean(dim=0)  # (n_cls, dim) - adapted
+        image_features_out = image_features  # already has visual ctx tokens
+        img_pre_out = img_pre_features  # with visual ctx tokens (for InterMean)
         text_pre_features = text_features_flat
 
         if return_features:

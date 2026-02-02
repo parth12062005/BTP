@@ -139,10 +139,6 @@ def main():
     for p in model.head_text_bias.parameters():
         p.requires_grad = True
         trainable_params.append(p)
-    if getattr(model, "vis_proj", None) is not None:
-        for p in model.vis_proj.parameters():
-            p.requires_grad = True
-            trainable_params.append(p)
 
     n_trainable = sum(p.numel() for p in trainable_params)
     n_total = sum(p.numel() for p in model.parameters())
