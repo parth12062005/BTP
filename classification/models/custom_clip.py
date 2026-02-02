@@ -738,22 +738,20 @@ class ClipBMPET(nn.Module):
             n_ctx=n_ctx, ctx_init=ctx_init, class_token_pos=class_token_pos, learned_cls=learned_cls,
             use_cocoop=True, use_reverse_cocoop=False,
         )
-        # Text/context dim (from transformer output)
-        text_dim = clip_model.ln_final.weight.shape[0]  # 512 for ViT-B, etc.
-        # Visual encoder output dim (may differ from text_dim, e.g. ViT-L visual 768 + text 512)
-        vis_emb = clip_model.visual.class_embedding
-        vis_dim = vis_emb.shape[-1] if vis_emb.dim() >= 1 else vis_emb.shape[0]
+        # Projected output dim (both image and text encoders output this after proj / text_projection)
+        proj = getattr(clip_model.visual, "proj", None)
+        embed_dim = proj.shape[1] if proj is not None else clip_model.ln_final.weight.shape[0]
         
         # Visual context prompt learner (CoCoOp-style for image side)
         self.visual_ctx_learner = VisualContextPromptLearner(clip_model, n_ctx_vis=n_ctx_vis, ctx_init=None)
         
-        # Wrap image encoder to insert visual context tokens
+        # Wrap image encoder to insert visual context tokens (outputs embed_dim after visual.proj)
         self.image_encoder = VisualEncoderWithContext(clip_model.visual, self.visual_ctx_learner)
         
-        # Fusion: concat(image_features, text_mean) -> input_dim = vis_dim + text_dim
-        fusion_input_dim = vis_dim + text_dim
+        # Fusion: concat(image_features, text_mean) -> both are embed_dim after projection -> 2 * embed_dim
+        fusion_input_dim = embed_dim * 2
         self.fusion = FusionMLP(input_dim=fusion_input_dim, hidden_dim=512, output_dim=128)
-        self.head_text_bias = BiasHead(input_dim=128, hidden_dim=64, output_dim=text_dim)
+        self.head_text_bias = BiasHead(input_dim=128, hidden_dim=64, output_dim=embed_dim)
 
     @property
     def dtype(self):
