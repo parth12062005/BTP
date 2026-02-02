@@ -384,6 +384,157 @@ class BiasHead(nn.Module):
         return self.net(x)
 
 
+class VisualContextPromptLearner(nn.Module):
+    """
+    CoCoOp-style visual context prompt learner for image side.
+    Learns visual context tokens [C1] [C2] [C3] that are inserted before CLS in ViT.
+    Meta-net adds conditional bias based on text features (text conditions image).
+    """
+    def __init__(self, clip_model, n_ctx_vis=4, ctx_init=None):
+        super().__init__()
+        self.n_ctx_vis = n_ctx_vis
+        vis_dim = clip_model.visual.conv1.weight.shape[0]  # patch embedding dim (e.g., 512 for ViT-B)
+        self.dtype = clip_model.visual.conv1.weight.dtype
+        self.device = clip_model.visual.conv1.weight.device
+        
+        # Learnable visual context tokens (same dim as patches)
+        if ctx_init:
+            # Initialize from text (not typical, but allows initialization)
+            logger.info("Visual context init not implemented yet; using random init")
+        ctx_vectors = torch.empty(n_ctx_vis, vis_dim, dtype=self.dtype, device=self.device)
+        nn.init.normal_(ctx_vectors, std=0.02)
+        self.ctx_init_state = ctx_vectors.detach().clone()
+        self.ctx = nn.Parameter(ctx_vectors)  # (n_ctx_vis, vis_dim)
+        
+        # Meta-net: text features -> bias for visual context tokens
+        # Input: text embedding dim (ctx_dim), output: vis_dim (for each ctx token)
+        ctx_dim = clip_model.ln_final.weight.shape[0]
+        h1, h2 = ctx_dim // 4, ctx_dim // 16
+        self.meta_net = nn.Sequential(OrderedDict([
+            ("linear1", nn.Linear(ctx_dim, h1)),
+            ("norm1", nn.LayerNorm(h1)),
+            ("relu1", nn.ReLU(inplace=True)),
+            ("linear2", nn.Linear(h1, h2)),
+            ("norm2", nn.LayerNorm(h2)),
+            ("relu2", nn.ReLU(inplace=True)),
+            ("linear3", nn.Linear(h2, vis_dim)),
+        ]))
+    
+    def reset(self):
+        """Reset visual context tokens to initial state."""
+        self.ctx.copy_(self.ctx_init_state)
+    
+    def forward(self, text_features=None):
+        """
+        Forward pass for visual context prompt learner.
+        
+        Args:
+            text_features: (B, dim) or (dim,) text features (for conditional bias)
+        
+        Returns:
+            visual_ctx: (B, n_ctx_vis, vis_dim) visual context tokens with conditional bias
+        """
+        if text_features is None:
+            # Static visual context (no conditional bias)
+            if self.ctx.dim() == 2:
+                return self.ctx.unsqueeze(0)  # (1, n_ctx_vis, vis_dim)
+            return self.ctx
+        
+        # Handle both batched and unbatched inputs
+        if text_features.dim() == 1:
+            text_features = text_features.unsqueeze(0)
+            squeeze_output = True
+        else:
+            squeeze_output = False
+        
+        B = text_features.shape[0]
+        
+        # Meta-net: text -> bias for visual context
+        meta_dtype = next(self.meta_net.parameters()).dtype
+        text_features = text_features.to(meta_dtype)
+        bias = self.meta_net(text_features)  # (B, vis_dim)
+        bias = bias.unsqueeze(1)  # (B, 1, vis_dim)
+        
+        # Add bias to base visual context tokens
+        base_ctx = self.ctx  # (n_ctx_vis, vis_dim)
+        ctx = base_ctx.unsqueeze(0)  # (1, n_ctx_vis, vis_dim)
+        ctx = ctx + bias  # (B, n_ctx_vis, vis_dim) - broadcast bias to all ctx tokens
+        ctx = ctx.to(self.dtype)
+        
+        if squeeze_output:
+            ctx = ctx.squeeze(0)
+        
+        return ctx
+
+
+class VisualEncoderWithContext(nn.Module):
+    """
+    Wrapper around CLIP ViT that inserts visual context tokens before CLS.
+    Sequence: [C1] [C2] [C3] [CLS] [P1] [P2] ... [PN]
+    """
+    def __init__(self, visual_encoder, visual_ctx_learner):
+        super().__init__()
+        self.visual = visual_encoder
+        self.visual_ctx_learner = visual_ctx_learner
+        self.n_ctx_vis = visual_ctx_learner.n_ctx_vis
+        
+    def forward(self, x, text_features=None):
+        """
+        Forward with visual context tokens inserted.
+        
+        Args:
+            x: (B, C, H, W) input images
+            text_features: (B, dim) optional text features for conditional visual ctx
+        
+        Returns:
+            image_features: (B, dim) CLS token output
+        """
+        B = x.shape[0]
+        visual = self.visual
+        
+        # Get visual context tokens (with conditional bias if text_features provided)
+        visual_ctx = self.visual_ctx_learner(text_features)  # (B, n_ctx_vis, vis_dim)
+        if visual_ctx.dim() == 2:
+            visual_ctx = visual_ctx.unsqueeze(0).expand(B, -1, -1)
+        
+        # Get patch embeddings using ViT's conv1 (patch embedding)
+        # For ViT-B/16: conv1 is Conv2d that patches the image
+        x = visual.conv1(x)  # (B, embed_dim, grid_h, grid_w)
+        grid_h, grid_w = x.shape[2], x.shape[3]
+        num_patches = grid_h * grid_w
+        x = x.reshape(B, x.shape[1], -1)  # (B, embed_dim, num_patches)
+        x = x.permute(0, 2, 1)  # (B, num_patches, embed_dim)
+        
+        # Get CLS token
+        cls_token = visual.class_embedding.expand(B, -1, -1)  # (B, 1, embed_dim)
+        
+        # Concatenate: [visual_ctx] [CLS] [patches]
+        x = torch.cat([visual_ctx, cls_token, x], dim=1)  # (B, n_ctx_vis + 1 + num_patches, embed_dim)
+        
+        # Add positional embeddings
+        # Original ViT pos_emb: [CLS] [P1] [P2] ... [PN] -> shape (num_patches + 1, embed_dim)
+        pos_emb = visual.positional_embedding  # (num_patches + 1, embed_dim)
+        cls_pos = pos_emb[0:1]  # (1, embed_dim) - CLS positional
+        patch_pos = pos_emb[1:]  # (num_patches, embed_dim) - patch positionals
+        
+        # Create new positional embeddings: [ctx_pos (zeros)] [CLS_pos] [patch_pos]
+        ctx_pos = torch.zeros(self.n_ctx_vis, pos_emb.shape[1], dtype=pos_emb.dtype, device=pos_emb.device)
+        new_pos_emb = torch.cat([ctx_pos, cls_pos, patch_pos], dim=0)  # (n_ctx_vis + 1 + num_patches, embed_dim)
+        x = x + new_pos_emb.unsqueeze(0)
+        
+        # Run through transformer
+        x = visual.ln_pre(x)
+        x = x.permute(1, 0, 2)  # (seq_len, B, embed_dim) for transformer
+        x = visual.transformer(x)
+        x = x.permute(1, 0, 2)  # (B, seq_len, embed_dim)
+        
+        # Extract CLS token (at position n_ctx_vis, after visual ctx tokens)
+        cls_idx = self.n_ctx_vis
+        x = visual.ln_post(x[:, cls_idx, :])  # (B, embed_dim)
+        
+        return x
+
+
 class ReverseMetaNet(nn.Module):
     """
     Opposite of CoCoOp meta_net: takes TEXT embedding and outputs a delta for IMAGE embedding.
@@ -565,13 +716,14 @@ class ClipTestTimePromptTuning(nn.Module):
 class ClipBMPET(nn.Module):
     """
     BMPETCLIP: BiModel Prompt and Embedding space TTA.
-    - CoOp-style learned prompt + CoCoOp meta-net for image-conditioned prompt bias.
+    - Text side: CoOp-style learned prompt + CoCoOp meta-net for image-conditioned prompt bias.
+    - Image side: Visual context tokens [C1] [C2] [C3] inserted before CLS, with CoCoOp-style conditional bias from text.
     - Fusion: (img_enc, text_enc) -> 1024 -> 512 -> 128 (BN between layers).
-    - Two heads from 128: (1) 128->64->bias for text (CoCoOp-type), (2) 128->64->bias for image (reverse CoCoOp-type).
+    - Head from 128: 128->64->bias for text (CoCoOp-type).
     - Final pass: adapted_image @ adapted_text for logits.
-    BNs in fusion and heads (and CLIP) are adapted during TTA.
+    BNs in fusion, head, visual ctx learner, and CLIP are adapted during TTA.
     """
-    def __init__(self, clip_model, normalization, arch_name, dataset_name, n_ctx=16,
+    def __init__(self, clip_model, normalization, arch_name, dataset_name, n_ctx=16, n_ctx_vis=4,
                  ctx_init=None, class_token_pos='end', learned_cls=False):
         super().__init__()
         self.base = ClipTestTimePromptTuning(
@@ -580,9 +732,16 @@ class ClipBMPET(nn.Module):
             use_cocoop=True, use_reverse_cocoop=False,
         )
         embed_dim = clip_model.ln_final.weight.shape[0]  # 512 for ViT-B
+        
+        # Visual context prompt learner (CoCoOp-style for image side)
+        self.visual_ctx_learner = VisualContextPromptLearner(clip_model, n_ctx_vis=n_ctx_vis, ctx_init=None)
+        
+        # Wrap image encoder to insert visual context tokens
+        self.image_encoder = VisualEncoderWithContext(clip_model.visual, self.visual_ctx_learner)
+        
+        # Fusion + text bias head (image bias removed - now using visual ctx tokens)
         self.fusion = FusionMLP(input_dim=embed_dim * 2, hidden_dim=512, output_dim=128)
         self.head_text_bias = BiasHead(input_dim=128, hidden_dim=64, output_dim=embed_dim)
-        self.head_image_bias = BiasHead(input_dim=128, hidden_dim=64, output_dim=embed_dim)
 
     @property
     def dtype(self):
@@ -606,34 +765,41 @@ class ClipBMPET(nn.Module):
         return self.base.get_text_features(image_features=image_features)
 
     def forward(self, image, return_features=False):
-        # ----- First pass: encoders only -----
+        # ----- First pass: image encoder with visual context tokens -----
         image = self.base.normalize(image.type(self.dtype))
-        img_pre_features = self.base.image_encoder(image)
-        image_features = img_pre_features / (img_pre_features.norm(dim=-1, keepdim=True) + 1e-8)
-        B = image_features.shape[0]
+        B = image.shape[0]
+        
+        # Get initial image features (without visual ctx) to compute text features for conditioning
+        # This is needed because visual ctx tokens are conditioned on text, but text is conditioned on image
+        # So we do: image -> text (CoCoOp) -> visual ctx (conditioned on text) -> final image (with visual ctx)
+        img_pre_features_no_ctx = self.base.image_encoder(image)  # (B, dim) - standard ViT
+        image_features_no_ctx = img_pre_features_no_ctx / (img_pre_features_no_ctx.norm(dim=-1, keepdim=True) + 1e-8)
+        
         # CoCoOp text features (image-conditioned prompts)
-        text_features = self.base.get_text_features(image_features=image_features)  # (B, n_cls, dim)
+        text_features = self.base.get_text_features(image_features=image_features_no_ctx)  # (B, n_cls, dim)
         text_mean = text_features.mean(dim=1)  # (B, dim)
+        
+        # Now run image encoder WITH visual context tokens (conditioned on text_mean)
+        img_pre_features = self.image_encoder(image, text_features=text_mean)  # (B, dim) - with visual ctx tokens
+        image_features = img_pre_features / (img_pre_features.norm(dim=-1, keepdim=True) + 1e-8)
 
-        # ----- Fusion + heads (encoder/decoder): embeddings -> biases -----
+        # ----- Fusion + text bias head: embeddings -> text bias -----
         # Fusion/heads are float32; CLIP may be Half -> cast for linear layers then back
         joint = torch.cat([image_features, text_mean], dim=-1)  # (B, 1024), may be Half
         joint_f = joint.float()
         z = self.fusion(joint_f)  # (B, 128)
         bias_text = self.head_text_bias(z)   # (B, dim)
-        bias_image = self.head_image_bias(z)  # (B, dim)
         bias_text = bias_text.to(image_features.dtype)
-        bias_image = bias_image.to(image_features.dtype)
 
-        # ----- Edit: add biases to first-pass embeddings -----
+        # ----- Edit: add bias to text embeddings -----
         adapted_text = text_features + bias_text.unsqueeze(1)  # (B, n_cls, dim)
-        adapted_image = image_features + bias_image  # (B, dim)
+        # Image side already has visual context tokens (no bias addition needed)
 
         # ----- Second pass (final): logits from adapted embeddings only -----
-        # No second run through image/text encoders; logits = adapted_image @ adapted_text^T
+        # Image features already include visual ctx tokens; text has bias
         logits_list = []
         for i in range(B):
-            ad_img = adapted_image[i:i + 1].to(self.dtype)
+            ad_img = image_features[i:i + 1].to(self.dtype)
             ad_txt = adapted_text[i].to(self.dtype)
             ad_txt = ad_txt / (ad_txt.norm(dim=-1, keepdim=True) + 1e-8)
             logit_i = self.base.logit_scale.exp().clamp(max=100.0) * (ad_img @ ad_txt.t())
@@ -642,8 +808,8 @@ class ClipBMPET(nn.Module):
 
         # For BATCLIP losses (TTA uses logits + these; loss is computed after this forward)
         text_features_flat = adapted_text.mean(dim=0)  # (n_cls, dim) - adapted
-        image_features_out = adapted_image
-        img_pre_out = img_pre_features  # first-pass raw (for InterMean)
+        image_features_out = image_features  # already has visual ctx tokens
+        img_pre_out = img_pre_features  # with visual ctx tokens (for InterMean)
         text_pre_features = text_features_flat
 
         if return_features:

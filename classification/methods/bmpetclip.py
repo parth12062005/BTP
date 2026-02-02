@@ -120,7 +120,9 @@ class BMPETCLIP(TTAMethod):
         for nm, m in self.model.named_modules():
             if not isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.LayerNorm, nn.GroupNorm)):
                 continue
-            if "fusion." in nm or "head_text_bias." in nm or "head_image_bias." in nm or "base.image_encoder." in nm or "base.text_encoder." in nm:
+            if ("fusion." in nm or "head_text_bias." in nm or 
+                ("visual_ctx_learner.meta_net." in nm and (".norm1" in nm or ".norm2" in nm)) or
+                "base.image_encoder." in nm or "base.text_encoder." in nm):
                 for np, p in m.named_parameters():
                     if np in ("weight", "bias"):
                         params.append(p)

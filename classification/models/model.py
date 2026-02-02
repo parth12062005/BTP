@@ -468,9 +468,11 @@ def get_model(cfg, num_classes: int, device: Union[str, torch.device]):
                     base_model.reverse_meta_net.load_state_dict(to_load, strict=False)
                     logger.info("Successfully restored image CoCoOp (reverse_meta_net) from %s", image_ckpt)
         elif cfg.MODEL.ADAPTATION in ["BMPETCLIP", "bmpetclip", "bmpet_clip"]:
+            n_ctx_vis = getattr(cfg.TPT, "N_CTX_VIS", cfg.TPT.N_CTX)  # Default to same as text ctx
             base_model = ClipBMPET(base_model, normalization,
                                    cfg.MODEL.ARCH, cfg.CORRUPTION.DATASET,
-                                   n_ctx=cfg.TPT.N_CTX, ctx_init=cfg.TPT.CTX_INIT,
+                                   n_ctx=cfg.TPT.N_CTX, n_ctx_vis=n_ctx_vis,
+                                   ctx_init=cfg.TPT.CTX_INIT,
                                    class_token_pos=cfg.TPT.CLASS_TOKEN_POS)
             if cfg.MODEL.CKPT_PATH:
                 ckpt = torch.load(cfg.MODEL.CKPT_PATH, map_location="cpu")

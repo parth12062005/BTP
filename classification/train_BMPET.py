@@ -105,19 +105,21 @@ def main():
     normalization = preprocess.transforms[-1]
     preprocess.transforms = preprocess.transforms[:-1]
 
-    logger.info("Creating BMPETCLIP model (CoOp+CoCoOp prompt + fusion + 2 bias heads)...")
+    logger.info("Creating BMPETCLIP model (CoOp+CoCoOp text prompt + visual context tokens + fusion + text bias head)...")
+    n_ctx_vis = getattr(args, "n_ctx_vis", args.n_ctx)  # Default to same as text ctx
     model = ClipBMPET(
         clip_model,
         normalization,
         arch_for_clip,
         "cifar10",
         n_ctx=args.n_ctx,
+        n_ctx_vis=n_ctx_vis,
         ctx_init=args.ctx_init.replace(" ", "_"),
         class_token_pos="end",
     )
     model = model.to(device)
 
-    # Train: prompt_learner (ctx + meta_net), fusion, head_text_bias, head_image_bias
+    # Train: prompt_learner (ctx + meta_net), visual_ctx_learner (ctx + meta_net), fusion, head_text_bias
     for p in model.parameters():
         p.requires_grad = False
     trainable_params = []
@@ -125,13 +127,16 @@ def main():
         if "token_embedding" not in name:
             p.requires_grad = True
             trainable_params.append(p)
+    for name, p in model.visual_ctx_learner.named_parameters():
+        if "meta_net" in name:  # Train meta-net; ctx is also trainable but already included
+            p.requires_grad = True
+            trainable_params.append(p)
+    # ctx is also trainable
+    trainable_params.append(model.visual_ctx_learner.ctx)
     for p in model.fusion.parameters():
         p.requires_grad = True
         trainable_params.append(p)
     for p in model.head_text_bias.parameters():
-        p.requires_grad = True
-        trainable_params.append(p)
-    for p in model.head_image_bias.parameters():
         p.requires_grad = True
         trainable_params.append(p)
 
