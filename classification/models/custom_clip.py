@@ -606,28 +606,31 @@ class ClipBMPET(nn.Module):
         return self.base.get_text_features(image_features=image_features)
 
     def forward(self, image, return_features=False):
+        # ----- First pass: encoders only -----
         image = self.base.normalize(image.type(self.dtype))
         img_pre_features = self.base.image_encoder(image)
         image_features = img_pre_features / (img_pre_features.norm(dim=-1, keepdim=True) + 1e-8)
         B = image_features.shape[0]
-
         # CoCoOp text features (image-conditioned prompts)
         text_features = self.base.get_text_features(image_features=image_features)  # (B, n_cls, dim)
         text_mean = text_features.mean(dim=1)  # (B, dim)
 
-        # Fusion: concat(img, text_mean) -> 1024 -> 512 -> 128
-        joint = torch.cat([image_features, text_mean], dim=-1)  # (B, 1024)
-        z = self.fusion(joint)  # (B, 128)
-
-        # Biases for text and image (CoCoOp-type and reverse CoCoOp-type)
+        # ----- Fusion + heads (encoder/decoder): embeddings -> biases -----
+        # Fusion/heads are float32; CLIP may be Half -> cast for linear layers then back
+        joint = torch.cat([image_features, text_mean], dim=-1)  # (B, 1024), may be Half
+        joint_f = joint.float()
+        z = self.fusion(joint_f)  # (B, 128)
         bias_text = self.head_text_bias(z)   # (B, dim)
         bias_image = self.head_image_bias(z)  # (B, dim)
+        bias_text = bias_text.to(image_features.dtype)
+        bias_image = bias_image.to(image_features.dtype)
 
-        # Aligned prompts: add biases
+        # ----- Edit: add biases to first-pass embeddings -----
         adapted_text = text_features + bias_text.unsqueeze(1)  # (B, n_cls, dim)
         adapted_image = image_features + bias_image  # (B, dim)
 
-        # Per-sample logits (aligned pass)
+        # ----- Second pass (final): logits from adapted embeddings only -----
+        # No second run through image/text encoders; logits = adapted_image @ adapted_text^T
         logits_list = []
         for i in range(B):
             ad_img = adapted_image[i:i + 1].to(self.dtype)
@@ -635,12 +638,12 @@ class ClipBMPET(nn.Module):
             ad_txt = ad_txt / (ad_txt.norm(dim=-1, keepdim=True) + 1e-8)
             logit_i = self.base.logit_scale.exp().clamp(max=100.0) * (ad_img @ ad_txt.t())
             logits_list.append(logit_i)
-        logits = torch.cat(logits_list, dim=0)  # (B, n_cls)
+        logits = torch.cat(logits_list, dim=0)  # (B, n_cls)  <- only logits; loss must use this
 
-        # For BATCLIP losses
-        text_features_flat = adapted_text.mean(dim=0)  # (n_cls, dim)
+        # For BATCLIP losses (TTA uses logits + these; loss is computed after this forward)
+        text_features_flat = adapted_text.mean(dim=0)  # (n_cls, dim) - adapted
         image_features_out = adapted_image
-        img_pre_out = img_pre_features
+        img_pre_out = img_pre_features  # first-pass raw (for InterMean)
         text_pre_features = text_features_flat
 
         if return_features:

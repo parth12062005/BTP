@@ -5,12 +5,15 @@ BMPETCLIP: BiModel Prompt and Embedding space TTA.
 - BNs in fusion, heads, and CLIP are adapted at TTA with BATCLIP losses.
 """
 
+import logging
 import torch
 import torch.nn as nn
 from methods.base import TTAMethod
 from utils.registry import ADAPTATION_REGISTRY
 from utils.losses import Entropy, I2TLoss, InterMeanLoss
 from methods.tpt import select_confident_samples, avg_entropy
+
+logger = logging.getLogger(__name__)
 
 
 @ADAPTATION_REGISTRY.register()
@@ -39,6 +42,10 @@ class BMPETCLIP(TTAMethod):
 
     @torch.enable_grad()
     def forward_and_adapt(self, x):
+        """
+        Single forward = first pass (encoders) -> fusion+heads -> edit -> second pass (logits).
+        Loss is computed only on the final-pass logits (after 2 passes).
+        """
         imgs_test = x[0]
 
         if self.scaler:
@@ -47,6 +54,7 @@ class BMPETCLIP(TTAMethod):
         else:
             outputs = self.model(imgs_test, return_features=True)
 
+        # logits = second-pass (adapted_image @ adapted_text); loss uses these only
         logits, image_features, text_features_flat, img_pre_features, text_pre_features = outputs
 
         if self.scaler:
@@ -84,6 +92,7 @@ class BMPETCLIP(TTAMethod):
         self.model.eval()
         self.model.requires_grad_(False)
 
+        adapted_layer_names = []
         for name, m in self.model.named_modules():
             if not isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.LayerNorm, nn.GroupNorm)):
                 continue
@@ -91,12 +100,18 @@ class BMPETCLIP(TTAMethod):
             in_clip = "base.image_encoder." in name or "base.text_encoder." in name
             if in_bmpet or in_clip:
                 m.requires_grad_(True)
+                adapted_layer_names.append(name)
                 if isinstance(m, nn.BatchNorm2d):
                     m.track_running_stats = False
                     m.running_mean = None
                     m.running_var = None
                 elif isinstance(m, (nn.BatchNorm1d,)):
                     m.train()
+
+        if adapted_layer_names:
+            logger.info("[BMPETCLIP] Layers adapted at TTA (%d total):", len(adapted_layer_names))
+            for nm in sorted(adapted_layer_names):
+                logger.info("  - %s", nm)
 
     def collect_params(self):
         """Collect trainable parameters: norm layers in fusion, heads, and CLIP base."""
