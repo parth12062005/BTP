@@ -505,8 +505,11 @@ class VisualEncoderWithContext(nn.Module):
         x = x.reshape(B, x.shape[1], -1)  # (B, embed_dim, num_patches)
         x = x.permute(0, 2, 1)  # (B, num_patches, embed_dim)
         
-        # Get CLS token
-        cls_token = visual.class_embedding.expand(B, -1, -1)  # (B, 1, embed_dim)
+        # Get CLS token (class_embedding may be 1D (embed_dim,) or 2D (1, embed_dim))
+        cls_emb = visual.class_embedding
+        if cls_emb.dim() == 1:
+            cls_emb = cls_emb.unsqueeze(0)  # (1, embed_dim)
+        cls_token = cls_emb.unsqueeze(0).expand(B, -1, -1)  # (B, 1, embed_dim)
         
         # Concatenate: [visual_ctx] [CLS] [patches]
         x = torch.cat([visual_ctx, cls_token, x], dim=1)  # (B, n_ctx_vis + 1 + num_patches, embed_dim)
