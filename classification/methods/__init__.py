@@ -19,10 +19,13 @@ from methods.deyo import DeYO
 from methods.vte import VTE
 from methods.tpt import TPT
 from methods.ours import OURS
+from methods.cocoop_batclip import CoCoOpBATCLIP
+from methods.good_bat_coop import GoodBATCoop
+from methods.bmpetclip import BMPETCLIP
 
 __all__ = [
     'Source', 'BNTest', 'BNAlpha', 'BNEMA', 'TTAug',
     'CoTTA', 'RMT', 'SANTA', 'RoTTA', 'AdaContrast', 'GTTA',
     'LAME', 'MEMO', 'Tent', 'EATA', 'SAR', 'RPL', 'ROID',
-    'CMF', 'DeYO', 'VTE', 'TPT', 'OURS'
+    'CMF', 'DeYO', 'VTE', 'TPT', 'OURS', 'CoCoOpBATCLIP', 'GoodBATCoop', 'BMPETCLIP'
 ]

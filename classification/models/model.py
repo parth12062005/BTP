@@ -15,7 +15,7 @@ from robustbench.utils import load_model
 from typing import Union
 from copy import deepcopy
 from models import resnet26
-from models.custom_clip import ClipTestTimePromptTuning
+from models.custom_clip import ClipTestTimePromptTuning, ClipBMPET
 from packaging import version
 from datasets.cls_names import get_class_names
 from datasets.imagenet_subsets import IMAGENET_A_MASK, IMAGENET_R_MASK, IMAGENET_V2_MASK, IMAGENET_D109_MASK
@@ -417,11 +417,72 @@ def get_model(cfg, num_classes: int, device: Union[str, torch.device]):
                 # Initiaize context prompts with CoOp pre-trained prompts (see: https://github.com/KaiyangZhou/CoOp?tab=readme-ov-file)
                 # or download them from here: https://drive.google.com/file/d/18ypxfd82RR0pizc5MM1ZWDYDk4j0BtPF/view
                 pretrained_ctx = torch.load(cfg.MODEL.CKPT_PATH)['state_dict']['ctx']
-                assert pretrained_ctx.shape[0] == cfg.TPT.N_CTX
+                assert pretrained_ctx.shape[0] >= cfg.TPT.N_CTX, (
+                    f"Pretrained ctx has {pretrained_ctx.shape[0]} tokens, need >= {cfg.TPT.N_CTX}")
+                load_ctx = pretrained_ctx[:cfg.TPT.N_CTX]
                 with torch.no_grad():
-                    base_model.prompt_learner.ctx.copy_(pretrained_ctx)
-                    base_model.prompt_learner.ctx_init_state = pretrained_ctx
+                    base_model.prompt_learner.ctx.copy_(load_ctx)
+                    base_model.prompt_learner.ctx_init_state = load_ctx.clone()
                 logger.info("Successfully restored pre-trained soft prompt (CoOp)")
+        elif cfg.MODEL.ADAPTATION in ["CoCoOpBATCLIP", "cocoopbatclip", "cocoop_batclip"]:
+            # CoCoOp-BATCLIP: use CoCoOp prompt learner; optionally add image CoCoOp (reverse_meta_net)
+            use_reverse_cocoop = getattr(cfg.MODEL, "USE_REVERSE_COCOOP", False) or getattr(cfg.MODEL, "IMAGE_COCOOP_CKPT_PATH", None)
+            base_model = ClipTestTimePromptTuning(base_model, normalization,
+                                                  cfg.MODEL.ARCH, cfg.CORRUPTION.DATASET,
+                                                  n_ctx=cfg.TPT.N_CTX, ctx_init=cfg.TPT.CTX_INIT,
+                                                  class_token_pos=cfg.TPT.CLASS_TOKEN_POS,
+                                                  use_cocoop=True,
+                                                  use_reverse_cocoop=bool(use_reverse_cocoop))
+            if cfg.MODEL.CKPT_PATH:
+                # Load ctx and meta_net (text CoCoOp) from checkpoint.
+                checkpoint = torch.load(cfg.MODEL.CKPT_PATH, map_location='cpu')
+                if 'state_dict' in checkpoint:
+                    state_dict = checkpoint['state_dict']
+                else:
+                    state_dict = checkpoint
+                state_dict = {k: v for k, v in state_dict.items() if k not in ("token_prefix", "token_suffix")}
+                ctx_key = "ctx" if "ctx" in state_dict else "prompt_learner.ctx" if "prompt_learner.ctx" in state_dict else None
+                if ctx_key:
+                    pretrained_ctx = state_dict[ctx_key]
+                    assert pretrained_ctx.shape[0] >= cfg.TPT.N_CTX, (
+                        f"Pretrained ctx has {pretrained_ctx.shape[0]} tokens, need >= {cfg.TPT.N_CTX}")
+                    load_ctx = pretrained_ctx[:cfg.TPT.N_CTX]
+                    with torch.no_grad():
+                        base_model.prompt_learner.ctx.copy_(load_ctx)
+                        base_model.prompt_learner.ctx_init_state = load_ctx.clone()
+                pl_sd = base_model.prompt_learner.state_dict()
+                to_load = {k: v for k, v in state_dict.items()
+                           if k.startswith("meta_net.") and k in pl_sd and pl_sd[k].shape == v.shape}
+                if to_load:
+                    base_model.prompt_learner.load_state_dict(to_load, strict=False)
+                if ctx_key or to_load:
+                    logger.info("Successfully restored pre-trained soft prompt (text CoCoOp) for CoCoOp-BATCLIP")
+            # Load image CoCoOp (reverse_meta_net) from separate checkpoint if provided
+            image_ckpt = getattr(cfg.MODEL, "IMAGE_COCOOP_CKPT_PATH", None)
+            if image_ckpt and getattr(base_model, "reverse_meta_net", None) is not None:
+                ckpt = torch.load(image_ckpt, map_location="cpu")
+                sd = ckpt.get("state_dict", ckpt)
+                rmn_sd = base_model.reverse_meta_net.state_dict()
+                to_load = {k: v for k, v in sd.items() if k in rmn_sd and rmn_sd[k].shape == v.shape}
+                if to_load:
+                    base_model.reverse_meta_net.load_state_dict(to_load, strict=False)
+                    logger.info("Successfully restored image CoCoOp (reverse_meta_net) from %s", image_ckpt)
+        elif cfg.MODEL.ADAPTATION in ["BMPETCLIP", "bmpetclip", "bmpet_clip"]:
+            n_ctx_vis = getattr(cfg.TPT, "N_CTX_VIS", cfg.TPT.N_CTX)  # Default to same as text ctx
+            base_model = ClipBMPET(base_model, normalization,
+                                   cfg.MODEL.ARCH, cfg.CORRUPTION.DATASET,
+                                   n_ctx=cfg.TPT.N_CTX, n_ctx_vis=n_ctx_vis,
+                                   ctx_init=cfg.TPT.CTX_INIT,
+                                   class_token_pos=cfg.TPT.CLASS_TOKEN_POS)
+            if cfg.MODEL.CKPT_PATH:
+                ckpt = torch.load(cfg.MODEL.CKPT_PATH, map_location="cpu")
+                sd = ckpt.get("state_dict", ckpt)
+                # Load prompt_learner (ctx, meta_net) and fusion + heads
+                model_sd = base_model.state_dict()
+                to_load = {k: v for k, v in sd.items() if k in model_sd and model_sd[k].shape == v.shape}
+                if to_load:
+                    base_model.load_state_dict(to_load, strict=False)
+                    logger.info("Successfully restored BMPET from %s (%d keys)", cfg.MODEL.CKPT_PATH, len(to_load))
         else:
             base_model = ZeroShotCLIP(cfg, base_model, device, normalize=normalization)
 

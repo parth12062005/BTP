@@ -83,6 +83,10 @@ _C.MODEL.USE_CLIP = False
 # Path to a specific checkpoint
 _C.MODEL.CKPT_PATH = ""
 
+# CoCoOp: use image-conditioned text + text-conditioned image (reverse_meta_net)
+_C.MODEL.USE_REVERSE_COCOOP = False
+_C.MODEL.IMAGE_COCOOP_CKPT_PATH = ""
+
 # Inspect the cfgs directory to see all possibilities
 _C.MODEL.ADAPTATION = 'source'
 
@@ -293,6 +297,7 @@ _C.TPT.SELECTION_P = 0.1            # Percentile of the most certain prediction
 _C.TPT.N_CTX = 4                    # Number of tunable context tokens
 _C.TPT.CTX_INIT = "a_photo_of_a"    # Context initialization
 _C.TPT.CLASS_TOKEN_POS = "end"      # Position of the class token. Choose from: [end, middle, front]
+_C.TPT.LAMBDA_ENT = 0.0             # Weight for TPT-style avg-entropy loss (0.0 to disable)
 
 # ------------------------------- Source options -------------------------- #
 _C.SOURCE = CfgNode()

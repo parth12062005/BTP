@@ -1,7 +1,8 @@
 import torch
 import logging
 import numpy as np
-from typing import Union
+from typing import Union, Optional
+from tqdm import tqdm
 from datasets.imagenet_subsets import IMAGENET_D_MAPPING
 
 
@@ -63,12 +64,14 @@ def get_accuracy(model: torch.nn.Module,
                  setting: str,
                  domain_dict: dict,
                  print_every: int,
-                 device: Union[str, torch.device]):
+                 device: Union[str, torch.device],
+                 progress_desc: Optional[str] = None):
 
     num_correct = 0.
     num_samples = 0
+    iterator = tqdm(data_loader, desc=progress_desc, unit="batch", leave=True, dynamic_ncols=True) if progress_desc else data_loader
     with torch.no_grad():
-        for i, data in enumerate(data_loader):
+        for i, data in enumerate(iterator):
             imgs, labels = data[0], data[1]
             output = model([img.to(device) for img in imgs]) if isinstance(imgs, list) else model(imgs.to(device))
             predictions = output.argmax(1)
