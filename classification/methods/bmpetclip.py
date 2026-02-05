@@ -1,8 +1,13 @@
 """
 BMPETCLIP: BiModel Prompt and Embedding space TTA.
-- Fusion (img, text) -> 512 -> 128 + two heads (128->64->bias for text/image).
-- CoOp + CoCoOp prompt; aligned pass for final logits.
-- BNs in fusion, heads, and CLIP are adapted at TTA with BATCLIP losses.
+- Text side: CoOp + CoCoOp (image-conditioned text prompts).
+- Image side: visual context tokens (text-conditioned image prompts) inserted before CLS.
+- Fusion: (img_emb, text_emb) -> 128, then a head to bias text embeddings.
+- During TTA, we adapt:
+  - Norm layers in CLIP visual/text encoders,
+  - Norm layers in fusion + text-bias head,
+  - LayerNorms in the visual context meta-net.
+  using BATCLIP losses (Entropy, I2T, InterMean) + optional TPT avg-entropy.
 """
 
 import logging
@@ -88,7 +93,14 @@ class BMPETCLIP(TTAMethod):
         return logits.detach()
 
     def configure_model(self):
-        """Adapt BNs in fusion, heads, and CLIP (visual + text) norm layers."""
+        """
+        Adapt norm layers in:
+        - CLIP visual encoder (base.image_encoder.*),
+        - CLIP text encoder (base.text_encoder.*),
+        - BMPET fusion MLP (fusion.*),
+        - BMPET text-bias head (head_text_bias.*),
+        - Visual context meta-net LayerNorms (visual_ctx_learner.meta_net.norm1/norm2).
+        """
         self.model.eval()
         self.model.requires_grad_(False)
 
@@ -96,16 +108,20 @@ class BMPETCLIP(TTAMethod):
         for name, m in self.model.named_modules():
             if not isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.LayerNorm, nn.GroupNorm)):
                 continue
-            # in_bmpet = "fusion." in name or "head_text_bias." in name or "head_image_bias." in name
+
+            in_fusion_head = "fusion." in name or "head_text_bias." in name
+            in_visual_ctx = "visual_ctx_learner.meta_net." in name and (".norm1" in name or ".norm2" in name)
             in_clip = "base.image_encoder." in name or "base.text_encoder." in name
-            if in_clip:
+
+            if in_fusion_head or in_visual_ctx or in_clip:
                 m.requires_grad_(True)
                 adapted_layer_names.append(name)
                 if isinstance(m, nn.BatchNorm2d):
                     m.track_running_stats = False
                     m.running_mean = None
                     m.running_var = None
-                elif isinstance(m, (nn.BatchNorm1d,)):
+                elif isinstance(m, nn.BatchNorm1d):
+                    # BN1d needs train mode for running stats
                     m.train()
 
         if adapted_layer_names:
@@ -114,7 +130,12 @@ class BMPETCLIP(TTAMethod):
                 logger.info("  - %s", nm)
 
     def collect_params(self):
-        """Collect trainable parameters: norm layers in fusion, heads, and CLIP base."""
+        """
+        Collect trainable parameters from:
+        - Norm layers in fusion + text-bias head,
+        - LayerNorms in visual_ctx_learner.meta_net (norm1/norm2),
+        - Norm layers in CLIP visual/text encoders.
+        """
         params = []
         names = []
         for nm, m in self.model.named_modules():
